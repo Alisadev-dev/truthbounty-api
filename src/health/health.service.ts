@@ -1,3 +1,4 @@
+import { getRuntimeEnvironment } from '../config/runtime-config';
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
@@ -45,7 +46,7 @@ export class HealthService {
   private readonly startTime = Date.now();
   private readonly lastSuccess = new Map<string, string>();
   private appVersion: string;
-  private readonly environment = process.env.NODE_ENV ?? 'development';
+  private readonly environment = getRuntimeEnvironment().NODE_ENV ?? 'development';
   private shuttingDown = false;
 
   private cachedChecks: { checkedAt: number; result: DependencyStatus[] } | null = null;
@@ -62,7 +63,7 @@ export class HealthService {
     private readonly blockchainStateService: BlockchainStateService,
     private readonly metricsService: MetricsService,
   ) {
-    this.appVersion = process.env.npm_package_version ?? '0.0.1';
+    this.appVersion = getRuntimeEnvironment().npm_package_version ?? '0.0.1';
   }
 
   getLiveness(): LivenessResult {

@@ -32,7 +32,9 @@
     "seed:ai": "ts-node src/scripts/seed-ai-knowledge-base.ts",
     "benchmark:indexes": "ts-node scripts/benchmark-indexes.ts",
     "benchmark:compare": "ts-node scripts/compare-benchmarks.ts",
-    "security:dependencies": "node scripts/dependency-audit.mjs"
+    "security:dependencies": "node scripts/dependency-audit.mjs",
+    "config:generate": "ts-node --project tsconfig.runtime-config.json --transpile-only scripts/generate-runtime-config.ts",
+    "config:check": "ts-node --project tsconfig.runtime-config.json --transpile-only scripts/generate-runtime-config.ts --check"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.128.0",
