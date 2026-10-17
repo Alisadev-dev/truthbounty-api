@@ -1,25 +1,30 @@
-import { Controller, Get, Post, Body, Param, Headers, Header, HttpCode, UseGuards, Req, BadRequestException, UnauthorizedException, ConflictException, NotFoundException, PayloadTooLargeException } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
-import { Request } from 'express';
+import { Controller, Get, Post, Body, Param, Headers } from '@nestjs/common';
+import { ApiTags } from '@nestjs/swagger';
 import { EventIndexingService } from './event-indexing.service';
 import { ReconciliationService } from './reconciliation.service';
 import { BlockchainStateService } from './state.service';
 import { WeightedVoteResolutionService } from './weighted-vote-resolution.service';
 import { ReadinessService } from './readiness.service';
 import { DeadLetterReplayService } from './dead-letter-replay.service';
-import { ReplayAuthorizationGuard } from './replay-authorization.guard';
-import { BlockInfo, ResolutionConfig, VerificationVote } from './types';
 import {
-  ReplayRequest,
-  ReplayResult,
-  ReplayBatchStatus,
-} from './dead-letter-replay.types';
+  BlockInfo,
+  ResolutionConfig,
+  VerificationVote,
+  DeadLetterReplayRequest,
+  DeadLetterReplayResult,
+  DeadLetterBatchControlRequest,
+  DeadLetterBatchControlResult,
+} from './types';
 
 /**
- * Default maximum number of messages a replay batch may contain.
- * Operators may request a smaller batch but never a larger one.
+ * Request headers required for dead-letter replay authorization.
+ * The capability token is validated by the replay service against the
+ * configured protected capability and is never logged or echoed back.
  */
-const DEFAULT_REPLAY_BATCH_LIMIT = 50;
+export interface ReplayAuthorizationHeaders {
+  'operator-id'?: string;
+  'replay-capability'?: string;
+}
 
 @ApiTags('blockchain')
 @Controller('api/v1/blockchain')
@@ -188,8 +193,7 @@ export class BlockchainController {
    * POST /api/v1/blockchain/config/resolution
    */
   @Post('config/resolution')
-  async updateResolutionConfig(@Body() config: Partial<ResolutionConfig>)
-    {
+  async updateResolutionConfig(@Body() config: Partial<ResolutionConfig>) {
     try {
       this.voteResolver.updateConfig(config);
       return {
@@ -200,7 +204,7 @@ export class BlockchainController {
     } catch (error) {
       return {
         success: false,
-        error: error.message,
+        error: (error as Error).message,
       };
     }
   }
@@ -241,212 +245,81 @@ export class BlockchainController {
   /**
    * Replay a single dead-letter message.
    *
-   * Replay is denied by default: the caller must present a protected capability
-   * token, a replay reason, and the original payload hash. The service enforces
-   * release/schema compatibility, idempotency, and immutable audit recording.
+   * Replay is denied by default: the caller must supply the protected
+   * capability header, an explicit reason, bounds, a dry-run flag, and the
+   * original payload hash. The service enforces release/schema compatibility,
+   * idempotency, and audit recording.
    */
-  @Post('dead-letter/:id/replay')
-  @UseGuards(ReplayAuthorizationGuard)
-  @ApiOperation({ summary: 'Replay a dead-letter message (idempotent, audited)' })
-  @ApiResponse({ status: 200, description: 'Replay accepted or deduplicated' })
-  @ApiResponse({ status: 401, description: 'Unauthorized' })
-  @ApiResponse({ status: 409, description: 'Stale release or duplicate replay' })
-  @ApiResponse({ status: 422, description: 'Poison message or payload hash mismatch' })
+  @Post('dead-letter/replay')
+  @ApiTags('dead-letter')
   async replayDeadLetter(
-    @Param('id') messageId: string,
-    @Body() body: ReplayRequest,
-    @Headers('authorization') authorization: string | undefined,
-    @Header('x-replay-reason') replayReason: string | undefined,
-    @Header('x-replay-capability') capability: string | undefined,
-    @Header('x-replay-actor') actor: string | undefined,
-    @Header('x-replay-dry-run') dryRunHeader: string | undefined,
-    @Req() req: Request,
-  ): Promise<ReplayResult> {
-    if (!authorization || !capability) {
-      throw new UnauthorizedException('replay requires protected capability');
-    }
-
-    const reason = body.reason ?? replayReason;
-    if (!reason || reason.trim().length === 0) {
-      throw new BadRequestException('replay requires a non-empty reason');
-    }
-
-    const dryRun =
-      typeof body.dryRun === 'boolean'
-        ? body.dryRun
-        : dryRunHeader === 'true';
-
-    const actorId = body.actor ?? actor ?? req.ip;
-    if (!actorId) {
-      throw new UnauthorizedException('replay requires an auditable actor');
-    }
-
-    const result = await this.replayService.replayOne({
-      messageId,
-      authorization,
-      capability,
-      reason,
-      actorId,
-      dryRun,
-      originalPayloadHash: body.originalPayloadHash,
-      releaseId: body.releaseId,
-      chainId: body.chainId,
-      deploymentBlock: body.deploymentBlock,
-      artifactChecksum: body.artifactChecksum,
+    @Body() request: DeadLetterReplayRequest,
+    @Headers() headers: ReplayAuthorizationHeaders,
+  ): Promise<DeadLetterReplayResult> {
+    return this.replayService.replaySingle(request, {
+      capability: headers['replay-capability'],
+      operatorId: headers['operator-id'],
     });
-
-    if (result.status === 'denied') {
-      throw new UnauthorizedException(result.reason ?? 'replay denied');
-    }
-    if (result.status === 'stale') {
-      throw new ConflictException(result.reason ?? 'release/schema incompatibility');
-    }
-    if (result.status === 'duplicate') {
-      throw new ConflictException('duplicate replay detected');
-    }
-    if (result.status === 'poison') {
-      throw new BadRequestException(result.reason ?? 'poison message');
-    }
-    if (result.status === 'not_found') {
-      throw new NotFoundException(result.reason ?? 'dead-letter message not found');
-    }
-
-    return result;
   }
 
   /**
    * Replay a bounded batch of dead-letter messages.
-   * Operators may stop/resume a batch via the control endpoints below.
    */
-  @Post('dead-letter/replay-batch')
-  @UseGuards(ReplayAuthorizationGuard)
-  @ApiOperation({ summary: 'Replay a bounded batch of dead-letter messages' })
+  @Post('dead-letter/replay/batch')
+  @ApiTags('dead-letter')
   async replayDeadLetterBatch(
-    @Body()
-    body: ReplayRequest & { messageIds?: string[]; limit?: number },
-    @Headers('authorization') authorization: string | undefined,
-    @Header('x-replay-reason') replayReason: string | undefined,
-    @Header('x-replay-capability') capability: string | undefined,
-    @Header('x-replay-actor') actor: string | undefined,
-    @Header('x-replay-dry-run') dryRunHeader: string | undefined,
-    @Req() req: Request,
-  ): Promise<{ batchId: string; results: ReplayResult[] }> {
-    if (!authorization || !capability) {
-      throw new UnauthorizedException('replay requires protected capability');
-    }
-
-    const reason = body.reason ?? replayReason;
-    if (!reason || reason.trim().length === 0) {
-      throw new BadRequestException('replay requires a non-empty reason');
-    }
-
-    const limit = body.limit ?? DEFAULT_REPLAY_BATCH_LIMIT;
-    if (!Number.isInteger(limit) || limit <= 0 || limit > DEFAULT_REPLAY_BATCH_LIMIT) {
-      throw new PayloadTooLargeException(
-        `replay batch limit must be between 1 and ${DEFAULT_REPLAY_BATCH_LIMIT}`,
-      );
-    }
-
-    const messageIds = body.messageIds ?? [];
-    if (messageIds.length > limit) {
-      throw new PayloadTooLargeException(
-        `replay batch exceeds limit of ${limit}`,
-      );
-    }
-
-    const dryRun =
-      typeof body.dryRun === 'boolean'
-        ? body.dryRun
-        : dryRunHHeader === 'true';
-
-    const actorId = body.actor ?? actor ?? req.ip;
-    if (!actorId) {
-      throw new UnauthorizedException('replay requires an auditable actor');
-    }
-
-    return this.replayService.replayBatch({
-      messageIds,
-      authorization,
-      capability,
-      reason,
-      actorId,
-      dryRun,
-      limit,
-      originalPayloadHash: body.originalPayloadHash,
-      releaseId: body.releaseId,
-      chainId: body.chainId,
-      deploymentBlock: body.deploymentBlock,
-      artifactChecksum: body.artifactChecksum,
+    @Body() request: DeadLetterBatchControlRequest,
+    @Headers() headers: ReplayAuthorizationHeaders,
+  ): Promise<DeadLetterBatchControlResult> {
+    return this.replayService.replayBatch(request, {
+      capability: headers['replay-capability'],
+      operatorId: headers['operator-id'],
     });
   }
 
   /**
-   * Stop an in-flight replay batch. Bounded batches are pausable at any time.
+   * Stop an in-flight bounded replay batch.
    */
-  @Post('dead-letter/replay-batch/:batchId/stop')
-  @UseGuards(ReplayAuthorizationGuard)
-  async stopReplayBatch(
-    @Param('batchId') batchId: string,
-    @Headers('authorization') authorization: string | undefined,
-    @Header('x-replay-capability') capability: string | undefined,
-    @Header('x-replay-actor') actor: string | undefined,
-    @Req() req: Request,
-  ): Promise<ReplayBatchStatus> {
-    if (!authorization || !capability) {
-      throw new UnauthorizedException('replay requires protected capability');
-    }
-    const actorId = actor ?? req.ip;
-    if (!actorId) {
-      throw new UnauthorizedException('replay requires an auditable actor');
-    }
-    return this.replayService.stopBatch(batchId, { authorization, capability, actorId });
+  @Post('dead-letter/replay/batch/:replayId/stop')
+  @ApiTags('dead-letter')
+  async stopDeadLetterReplayBatch(
+    @Param('replayId') replayId: string,
+    @Headers() headers: ReplayAuthorizationHeaders,
+  ): Promise<DeadLetterBatchControlResult> {
+    return this.replayService.stopBatch(replayId, {
+      capability: headers['replay-capability'],
+      operatorId: headers['operator-id'],
+    });
   }
 
   /**
-   * Resume a previously stopped replay batch.
+   * Resume a stopped bounded replay batch.
    */
-  @Post('dead-letter/replay-batch/:batchId/resume')
-  @UseGuards(ReplayAuthorizationGuard)
-  async resumeReplayBatch(
-    @Param('batchId') batchId: string,
-    @Headers('authorization') authorization: string | undefined,
-    @Header('x-replay-capability') capability: string | undefined,
-    @Header('x-replay-actor') actor: string | undefined,
-    @Req() req: Request,
-  ): Promise<ReplayBatchStatus> {
-    if (!authorization || !capability) {
-      throw new UnauthorizedException('replay requires protected capability');
-    }
-    const actorId = actor ?? req.ip;
-    if (!actorId) {
-      throw new UnauthorizedException('replay requires an auditable actor');
-    }
-    return this.replayService.resumeBatch(batchId, { authorization, capability, actorId });
+  @Post('dead-letter/replay/batch/:replayId/resume')
+  @ApiTags('dead-letter')
+  async resumeDeadLetterReplayBatch(
+    @Param('replayId') replayId: string,
+    @Headers() headers: ReplayAuthorizationHeaders,
+  ): Promise<DeadLetterBatchControlResult> {
+    return this.replayService.resumeBatch(replayId, {
+      capability: headers['replay-capability'],
+      operatorId: headers['operator-id'],
+    });
   }
 
   /**
-   * Get the status of a replay batch.
+   * Get the immutable audit record for a replay (original -> replay linkage).
    */
-  @Get('dead-letter/replay-batch/:batchId')
-  async getReplayBatchStatus(
-    @Param('batchId') batchId: string,
-  ): Promise<ReplayBatchStatus> {
-    const status = await this.replayService.getBatchStatus(batchId);
-    if (!status) {
-      throw new NotFoundException(`replay batch ${batchId} not found`);
-    }
-    return status;
-  }
-
-  /**
-   * Get the immutable audit trail for a replay (original -> replay linkage).
-   */
-  @Get('dead-letter/:id/replay-audit')
-  async getReplayAudit(
-    @Param('id') messageId: string,
-  ): Promise<{ records: unknown[] }> {
-    const records = await this.replayService.getAuditRecords(messageId);
-    return { records };
+  @Get('dead-letter/replay/:replayId/audit')
+  @ApiTags('dead-letter')
+  async getDeadLetterReplayAudit(
+    @Param('replayId') replayId: string,
+    @Headers() headers: ReplayAuthorizationHeaders,
+  ) {
+    return this.replayService.getAuditRecord(replayId, {
+      capability: headers['replay-capability'],
+      operatorId: headers['operator-id'],
+    });
   }
 
   /**

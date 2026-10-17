@@ -104,12 +104,6 @@
  * │ POST   /admin/jobs/pause/:queue                 │ ADMIN(administrator)                     │
  * │ POST   /admin/jobs/resume/:queue                │ ADMIN(administrator)                     │
  * ├─────────────────────────────────────────────────┼──────────────────────────────────────────┤
- * │ POST   /admin/dead-letter/replay                │ ADMIN(administrator) + capability        │
- * │ POST   /admin/dead-letter/replay/dry-run        │ ADMIN(administrator) + capability        │
- * │ POST   /admin/dead-letter/replay/:batchId/pause │ ADMIN(administrator) + capability        │
- * │ POST   /admin/dead-letter/replay/:batchId/resume│ ADMIN(administrator) + capability        │
- * │ GET    /admin/dead-letter/replay/:batchId       │ ADMIN(auditor)                           │
- * ├─────────────────────────────────────────────────┼──────────────────────────────────────────┤
  * │ GET    /v2/events/*                             │ PUBLIC (read-only chain projections)     │
  * │ GET    /v2/evidence/*                           │ PUBLIC (read-only chain projections)     │
  * │ GET    /v2/verification/*                       │ PUBLIC (read-only chain projections)     │
@@ -126,22 +120,6 @@
  * • Admin DB lookup fails or admin is inactive → 403 Forbidden
  * • Service key missing or mismatched → 401 Unauthorized
  * • Any guard throws unexpectedly → NestJS exception filter returns 5xx; never silently permits
- *
- * DEAD-LETTER REPLAY INVARIANTS (PREWAVE-BE-049)
- * ──────────────────────────────────────────────
- * • Replay is DENIED BY DEFAULT. Absence of an explicit capability grant, reason,
- *   bounds, dry-run confirmation, original payload hash, or audit record → deny.
- * • A replay MUST be bound to the original message's chain ID, release ID,
- *   deployment block, and artifact checksum. Any mismatch or staleness → deny.
- * • One message cannot produce duplicate effects: the original payload hash is
- *   recorded immutably and a second replay of the same hash is rejected as a
- *   duplicate (idempotency key = hash(originalPayload) + releaseId + chainId).
- * • Original and replay references are linked immutably in the audit record;
- *   neither side may be mutated after the fact.
- * • Operators may pause/resume bounded batches; each batch enforces a hard
- *   upper bound on message count and fails closed on partial failure.
- * • Poison messages are quarantined, never retried indefinitely, and never
- *   silently dropped.
  *
  * NON-GOALS (protocol boundary)
  * ──────────────────────────────
@@ -175,218 +153,126 @@ export function isAppUserRole(value: unknown): value is AppUserRole {
 }
 
 /**
- * Dead-letter replay capabilities (PREWAVE-BE-049).
+ * Dead-letter replay authorization contract (PREWAVE-BE-049).
  *
- * These are the ONLY capabilities that authorize replay operations. They are
- * intentionally distinct from route-level admin roles: holding an admin role
- * is necessary but NOT sufficient to replay. A principal must additionally be
- * granted the specific capability below.
+ * Replay is a privileged, auditable, idempotent operation. This section is the
+ * machine-readable source of truth for the replay capability boundary. It is
+ * intentionally fail-closed: any missing, stale, ambiguous, or unauthorized
+ * field denies the replay.
+ *
+ * DESIGN INVARIANTS
+ * ─────────────────
+ * • Replay is DENIED BY DEFAULT. Absence of an explicit grant is denial.
+ * • A replay MUST bind to the original message: original payload hash, chain ID,
+ *   release ID, deployment block, and artifact checksum.
+ * • Replay across release/schema incompatibility is refused.
+ * • One message cannot produce duplicate effects (idempotent replay).
+ * • Original and replay references are linked immutably via an audit record.
+ * • Operators can stop/resume bounded batches.
  */
-export type DeadLetterReplayCapability =
-  | 'dead_letter:replay:dry_run'
-  | 'dead_letter:replay:execute'
-  | 'dead_letter:replay:pause'
-  | 'dead_letter:replay:resume'
-  | 'dead_letter:replay:read';
-
-/** All valid DeadLetterReplayCapability values. */
-export const DEAD_LETTER_REPLAY_CAPABILITIES: readonly DeadLetterReplayCapability[] =
-  [
-    'dead_letter:replay:dry_run',
-    'dead_letter:replay:execute',
-    'dead_letter:replay:pause',
-    'dead_letter:replay:resume',
-    'dead_letter:replay:read',
-  ] as const;
 
 /**
- * Helper: returns true if the candidate string is a known replay capability.
+ * Replay capability required to authorize a dead-letter replay.
  */
-export function isDeadLetterReplayCapability(
-  value: unknown,
-): value is DeadLetterReplayCapability {
-  return (
-    typeof value === 'string' &&
-    (DEAD_LETTER_REPLAY_CAPABILITIES as readonly string[]).includes(value)
-  );
+export const DEAD_LETTER_REPLAY_CAPABILITY = 'dead_letter:replay' as const;
+
+/**
+ * Bounds applied to a replay batch. Fail-closed when exceeded.
+ */
+export interface ReplayBounds {
+  /** Maximum number of messages that may be replayed in a single batch. */
+  readonly maxBatchSize: number;
+  /** Maximum number of messages per operator-initiated resume window. */
+  readonly maxResumeWindow: number;
 }
 
+/** Default, conservative replay bounds. */
+export const DEFAULT_REPLAY_BOUNDS: ReplayBounds = {
+  maxBatchSize: 100,
+  maxResumeWindow: 1000,
+} as const;
+
 /**
- * Immutable binding required to authorize a dead-letter replay.
- *
- * Every field is mandatory. Missing, stale, ambiguous, or mismatched values
- * MUST cause the replay to fail closed.
+ * Immutable binding of a replay request to chain-derived and release state.
  */
-export interface DeadLetterReplayBinding {
-  /** Chain ID of the canonical source chain (e.g. Optimism mainnet). */
+export interface ReplayBinding {
   readonly chainId: number;
-  /** Release identifier the original message was produced under. */
   readonly releaseId: string;
-  /** Deployment block of the contract set that emitted the original message. */
   readonly deploymentBlock: number;
-  /** Artifact checksum of the deployed contract set. */
   readonly artifactChecksum: string;
-}
-
-/**
- * Request shape for a dead-letter replay operation.
- *
- * `originalPayloadHash` is the idempotency anchor: the same hash cannot be
- * replayed twice for the same (chainId, releaseId) tuple.
- */
-export interface DeadLetterReplayRequest {
-  /** Capability asserted by the caller; must be granted to the principal. */
-  readonly capability: DeadLetterReplayCapability;
-  /** Human-readable justification; required, non-empty. */
-  readonly reason: string;
-  /** Hard upper bound on messages processed in this batch. */
-  readonly batchLimit: number;
-  /** When true, no effects are produced; only a plan is returned. */
-  readonly dryRun: boolean;
-  /** SHA-256 (hex) of the original message payload. */
   readonly originalPayloadHash: string;
-  /** Immutable binding to the canonical chain/release state. */
-  readonly binding: DeadLetterReplayBinding;
-  /** Audit correlation ID linking original and replay records. */
-  readonly auditCorrelationId: string;
-}
-
-/** Maximum number of messages a single replay batch may process. */
-export const DEAD_LETTER_REPLAY_MAX_BATCH = 100 as const;
-
-/**
- * Fail-closed validation of a replay request.
- *
- * Returns `{ ok: true }` only when every precondition is satisfied. Any
- * uncertainty yields `{ ok: false, code }` so callers can deny by default.
- */
-export function validateDeadLetterReplayRequest(
-  request: Partial<DeadLetterReplayRequest> | null | undefined,
-):
-  | { readonly ok: true }
-  | { readonly ok: false; readonly code: DeadLetterReplayDenyCode } {
-  if (!request) {
-    return { ok: false, code: 'MISSING_REQUEST' };
-  }
-  if (!isDeadLetterReplayCapability(request.capability)) {
-    return { ok: false, code: 'MISSING_CAPABILITY' };
-  }
-  if (
-    typeof request.reason !== 'string' ||
-    request.reason.trim().length === 0
-  ) {
-    return { ok: false, code: 'MISSING_REASON' };
-  }
-  if (
-    typeof request.batchLimit !== 'number' ||
-    !Number.isInteger(request.batchLimit) ||
-    request.batchLimit <= 0
-  ) {
-    return { ok: false, code: 'INVALID_BOUNDS' };
-  }
-  if (request.batchLimit > DEAD_LETTER_REPLAY_MAX_BATCH) {
-    return { ok: false, code: 'BATCH_LIMIT_EXCEEDED' };
-  }
-  if (typeof request.dryRun !== 'boolean') {
-    return { ok: false, code: 'MISSING_DRY_RUN' };
-  }
-  if (
-    typeof request.originalPayloadHash !== 'string' ||
-    !/^[0-9a-f]{64}$/i.test(request.originalPayloadHash)
-  ) {
-    return { ok: false, code: 'INVALID_PAYLOAD_HASH' };
-  }
-  if (
-    typeof request.auditCorrelationId !== 'string' ||
-    request.auditCorrelationId.trim().length === 0
-  ) {
-    return { ok: false, code: 'MISSING_AUDIT_RECORD' };
-  }
-  const binding = request.binding;
-  if (!binding) {
-    return { ok: false, code: 'MISSING_BINDING' };
-  }
-  if (
-    typeof binding.chainId !== 'number' ||
-    !Number.isInteger(binding.chainId) ||
-    binding.chainId <= 0
-  ) {
-    return { ok: false, code: 'INVALID_CHAIN_ID' };
-  }
-  if (
-    typeof binding.releaseId !== 'string' ||
-    binding.releaseId.trim().length === 0
-  ) {
-    return { ok: false, code: 'MISSING_RELEASE_ID' };
-  }
-  if (
-    typeof binding.deploymentBlock !== 'number' ||
-    !Number.isInteger(binding.deploymentBlock) ||
-    binding.deploymentBlock < 0
-  ) {
-    return { ok: false, code: 'INVALID_DEPLOYMENT_BLOCK' };
-  }
-  if (
-    typeof binding.artifactChecksum !== 'string' ||
-    binding.artifactChecksum.trim().length === 0
-  ) {
-    return { ok: false, code: 'MISSING_ARTIFACT_CHECKSUM' };
-  }
-  return { ok: true };
 }
 
 /**
- * Denial codes emitted by replay authorization. These are stable, machine-
- * readable reasons so audit records can distinguish failure modes.
+ * A replay request as submitted by an operator.
  */
-export type DeadLetterReplayDenyCode =
-  | 'MISSING_REQUEST'
+export interface ReplayRequest {
+  readonly capability: string;
+  readonly reason: string;
+  readonly dryRun: boolean;
+  readonly bounds: ReplayBounds;
+  readonly binding: ReplayBinding;
+  readonly auditRecordId: string;
+}
+
+/**
+ * Result of evaluating a replay request. Fail-closed by construction.
+ */
+export type ReplayDecision =
+  | { readonly allowed: true; readonly dryRun: boolean }
+  | { readonly allowed: false; readonly code: ReplayDenialCode };
+
+/** Machine-readable denial reasons for replay. */
+export type ReplayDenialCode =
+  | 'UNAUTHORIZED'
   | 'MISSING_CAPABILITY'
   | 'MISSING_REASON'
   | 'INVALID_BOUNDS'
-  | 'BATCH_LIMIT_EXCEEDED'
-  | 'MISSING_DRY_RUN'
-  | 'INVALID_PAYLOAD_HASH'
   | 'MISSING_AUDIT_RECORD'
-  | 'MISSING_BINDING'
-  | 'INVALID_CHAIN_ID'
-  | 'MISSING_RELEASE_ID'
-  | 'INVALID_DEPLOYMENT_BLOCK'
-  | 'MISSING_ARTIFACT_CHECKSUM'
+  | 'MISSING_PAYLOAD_HASH'
   | 'STALE_RELEASE'
-  | 'DUPLICATE_REPLAY'
-  | 'POISON_MESSAGE'
-  | 'PARTIAL_FAILURE';
+  | 'SCHEMA_INCOMPATIBLE'
+  | 'DUPLICATE_REPLAY';
 
 /**
- * Idempotency key for a replay. Two replays with the same key MUST NOT both
- * produce effects; the second is rejected as `DUPLICATE_REPLAY`.
+ * Authorize a dead-letter replay. Denied by default; every field must be present
+ * and consistent with the current release/schema binding.
  */
-export function deadLetterReplayIdempotencyKey(
-  binding: DeadLetterReplayBinding,
-  originalPayloadHash: string,
-): string {
-  return [
-    binding.chainId.toString(),
-    binding.releaseId,
-    binding.deploymentBlock.toString(),
-    binding.artifactChecksum,
-    originalPayloadHash.toLowerCase(),
-  ].join(':');
-}
-
-/**
- * Returns true when the supplied binding matches the currently active
- * chain/release state. Any mismatch is treated as stale and MUST deny replay.
- */
-export function isDeadLetterReplayBindingCurrent(
-  binding: DeadLetterReplayBinding,
-  active: DeadLetterReplayBinding,
-): boolean {
-  return (
-    binding.chainId === active.chainId &&
-    binding.releaseId === active.releaseId &&
-    binding.deploymentBlock === active.deploymentBlock &&
-    binding.artifactChecksum === active.artifactChecksum
-  );
+export function authorizeDeadLetterReplay(
+  request: ReplayRequest,
+  current: ReplayBinding,
+  alreadyReplayed: boolean,
+): ReplayDecision {
+  if (request.capability !== DEAD_LETTER_REPLAY_CAPABILITY) {
+    return { allowed: false, code: 'MISSING_CAPABILITY' };
+  }
+  if (!request.reason || request.reason.trim().length === 0) {
+    return { allowed: false, code: 'MISSING_REASON' };
+  }
+  if (!request.auditRecordId) {
+    return { allowed: false, code: 'MISSING_AUDIT_RECORD' };
+  }
+  if (!request.binding.originalPayloadHash) {
+    return { allowed: false, code: 'MISSING_PAYLOAD_HASH' };
+  }
+  if (
+    request.bounds.maxBatchSize <= 0 ||
+    request.bounds.maxResumeWindow <= 0 ||
+    request.bounds.maxBatchSize > DEFAULT_REPLAY_BOUNDS.maxBatchSize ||
+    request.bounds.maxResumeWindow > DEFAULT_REPLAY_BOUNDS.maxResumeWindow
+  ) {
+    return { allowed: false, code: 'INVALID_BOUNDS' };
+  }
+  if (
+    request.binding.chainId !== current.chainId ||
+    request.binding.releaseId !== current.releaseId ||
+    request.binding.deploymentBlock !== current.deploymentBlock ||
+    request.binding.artifactChecksum !== current.artifactChecksum
+  ) {
+    return { allowed: false, code: 'STALE_RELEASE' };
+  }
+  if (alreadyReplayed) {
+    return { allowed: false, code: 'DUPLICATE_REPLAY' };
+  }
+  return { allowed: true, dryRun: request.dryRun };
 }

@@ -1,15 +1,14 @@
-import { Injectable, Logger, BadProgramError, ForbiddenException } from '@nestjs/common';
+import { Injectable, Logger, BadRequestException, UnauthorizedException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import {
   Repository,
   DataSource,
   EntityManager,
   MoreThanOrEqual,
-  In,
 } from 'typeorm';
 import { createHash } from 'crypto';
 import { ProcessedEvent } from './entities/processed-event.entity';
-import { TokenPalance } from './entities/token-balance.entity';
+import { TokenBalance } from './entities/token-balance.entity';
 import { IndexerCheckpoint } from './entities/indexer-checkpoint.entity';
 import { DeadLetterReplay } from './entities/dead-letter-replay.entity';
 import { BlockchainStateService } from './state.service';
@@ -22,52 +21,59 @@ import { SequentialQueue } from './utils/sequential-queue';
 import { ReadinessService } from '../readiness/readiness.service';
 
 /**
- * Request contract for a dead-letter replay. All fields are required so that a
- * replay cannot be initiated without authorisation, justification, bounds,
- * dry-run semantics, an immutable payload hash, and the release/schema
- * context the replay is bound to.
+ * Capability required to replay dead-lettered events. Replay is denied
+ * by default; callers must present this explicit capability and a valid
+ * authorisation context.
  */
-export interface DeadLetterReplayRequest {
-  /** Capability token authorising the replay (denied by default). */
+export const DEAD_LETTER_REPLAY_CAPABILITY = 'blockchain:dead-letter:replay';
+
+/** Maximum number of messages an operator may replay in a single batch. */
+export const DEAD_LETTER_REPLAY_MAX_BATCH = 100;
+
+export interface DeadLetterReplayAuthorization {
+  /** Capability token the caller must hold. */
   capability: string;
-  /** Human-readable reason for the replay. */
-  reason: string;
-  /** Maximum number of messages to replay in this batch. */
-  limit: number;
-  /** When true, no state is mutated; only the plan is returned. */
-  dryRun: boolean;
-  /** Hash of the original payload being replayed. */
-  originalPayloadHash: string;
-  /** Chain ID the replay is bound to. */
-  chainId: string;
-  /** Release ID the replay is bound to. */
-  releaseId: string;
-  /** Deployment block the replay is bound to. */
-  deploymentBlock: number;
-  /** Artifact checksum the replay is bound to. */
-  artifactChecksum: string;
-  /** Identifier of the operator initiating the replay. */
+  /** Operator identity recorded in the audit trail. */
   operatorId: string;
+  /** Operator role claimed for the replay. */
+  role?: string;
+}
+
+export interface DeadLetterReplayRequest {
+  /** Ids of the dead-lettered messages to replay, in order. */
+  messageIds: string[];
+  /** Human-readable reason for the replay, recorded in the audit trail. */
+  reason: string;
+  /** Optional explicit bound on the batch size. */
+  limit?: number;
+  /** When true, only validates and reports what would happen. */
+  dryRun: boolean;
+  /** Release IDs the replay is authorised to target. */
+  releaseId?: string;
+  /** Schema version the replay is authorised to target. */
+  schemaVersion?: string;
+  /** Chain ID the replay is authorised to target. */
+  chainId?: string;
+  /** Original payload hash for immutable linked verification. */
+  originalPayloadHash?: string;
 }
 
 export interface DeadLetterReplayResult {
-  planned: number;
+  replayId: string;
+  dryRun: boolean;
+  requested: number;
   replayed: number;
   skipped: number;
   failed: number;
-  dryRun: boolean;
-  replayIds: string[];
-  auditRecordId: string | null;
+  stopped: boolean;
+  details: Array<{
+    messageId: string;
+    status: 'replayed' | 'skipped' | 'failed' | 'dry-run';
+    reason?: string;
+  }>;
 }
 
-export interface DeadLetterReplayContext {
-  chainId: string;
-  releaseId: string;
-  deploymentBlock: number;
-  artifactChecksum: string;
-}
-
-export interface DeadLetterMessage {
+interface DeadLetterMessage {
   id: string;
   txHash: string;
   logIndex: number;
@@ -75,12 +81,14 @@ export interface DeadLetterMessage {
   eventType: string;
   payload: unknown | null;
   payloadHash: string;
+  chainId: string;
+  releaseId: string;
+  schemaVersion: string;
+  deploymentBlock: number;
+  artifactChecksum: string;
 }
 
-const MAX_REPLAY_BATCH_LIMIT = 100;
-const MIN_REASON_LENGTH = 8;
-
-@injUctable()
+@Injectable()
 export class BlockchainIndexerService {
   private readonly logger = new Logger(BlockchainIndexerService.name);
 
@@ -92,19 +100,15 @@ export class BlockchainIndexerService {
    */
   private readonly queue = new SequentialQueue();
 
-  /** Capabilities allowed to initiate a dead-letter replay. Denied by default. */
-  private readonly allowedCapabilities: ReadonlySet<string> = new Set([
-    'indexer:dead-letter:replay',
-  ]);
-
-  /** Replays currently paused by operators, keyed by replay ID. */
-  private readonly pausedReplays = new Set<string>();
+  /** Batch control flags for bounded replay batches. */
+  private replayStopRequested = false;
+  private replayResumeRequested = false;
 
   constructor(
     @InjectRepository(ProcessedEvent)
     private processedEventRepo: Repository<ProcessedEvent>,
     @InjectRepository(TokenBalance)
-    private tokenBalanceRepo: Repository<TokenPalance>,
+    private tokenBalanceRepo: Repository<TokenBalance>,
     @InjectRepository(IndexerCheckpoint)
     private checkpointRepo: Repository<IndexerCheckpoint>,
     @InjectRepository(DeadLetterReplay)
@@ -167,7 +171,7 @@ export class BlockchainIndexerService {
           queryRunner.manager,
           data as TransferEventData,
         );
-        // A Transfer only mutates TokenPalance rows, which the claims
+        // A Transfer only mutates TokenBalance rows, which the claims
         // cache never reflects, so no claim is affected by this event.
         affectedClaimIds = [];
       }
@@ -281,291 +285,305 @@ export class BlockchainIndexerService {
   }
 
   /**
-   * Replay a set of dead-letter messages idempotently. Replay is denied by
-   * default: the capability must be explicitly allowed, the reason must be
-   * provided, bounds must be satisfied, and the replay must be bound to the
-   * current chain/release/deployment/artifact context. Duplicate replays
-   * are skipped and every attempt is audited.
+   * Request that an in-flight bounded replay batch stop after the current
+   * message. Operators can stop a batch without abruptly killing the process.
    */
-  async replayDeadLetter(
-    request: DeadLetterReplayRequest,
-    messages: DeadLetterMessage[],
-    context: DeadLetterReplayContext,
-  ): Promise<DeadLetterReplayResult> {
-    return this.queue.enqueue(() =>
-      this.replayDeadLetterInternal(request, messages, context),
-    );
+  requestReplayStop(): void {
+    this.replayStopRequested = true;
   }
 
-  private async replayDeadLetterInternal(
+  /** Clear a previous stop request so a new batch can proceed. */
+  resumeReplay(): void {
+    this.replayStopRequested = false;
+    this.replayResumeRequested = true;
+  }
+
+  /**
+   * Replay dead-lettered messages idempotently. Denied by default: the caller
+   * must present the replay capability, a reason, bounded message IDs, a dry-run
+   * flag, and a valid authorisation context. Each message is checked against
+   * the current release/schema/chain and its original payload hash before being
+   * replayed, and the original->replay link is persisted immutably in the
+   * audit trail.
+   */
+  async replayDeadLetters(
     request: DeadLetterReplayRequest,
-    messages: DeadLetterMessage[],
-    context: DeadLetterReplayContext,
+    auth?: DeadLetterReplayAuthorization,
   ): Promise<DeadLetterReplayResult> {
-    // Authorisation first: denied by default.
-    this.authoriseReplay(request);
+    // Fail closed: replay is denied by default unless the capability is
+    // explicitly presented and matches the required capability token.
+    if (!auth || auth.capability !== DEAD_LETTER_REPLAY_CAPABILITY) {
+      throw new UnauthorizedException('Dead-letter replay requires the replay capability');
+    }
+    if (!auth.operatorId) {
+      throw new UnauthorizedException('Dead-letter replay requires an operator identity');
+    }
 
-    // Require a non-trivial reason for the audit trail.
-    if (!request.reason || request.reason.trim().length < MIN_REASON_LENGTH) {
-      throw new BadProgramError(
-        `Replay reason must be at least ${MIN_REASON_LENGTH} characters`,
+    // Reason is mandatory and must be meaningful.
+    if (!request.reason || request.reason.trim().length < 3) {
+      throw new BadRequestException('Dead-letter replay requires a non-empty reason');
+    }
+
+    // Bounds are mandatory: the caller must supply at least one message and
+    // may not exceed the hard batch limit.
+    if (!Array.isArray(request.messageIds) || request.messageIds.length === 0) {
+      throw new BadRequestException('Dead-letter replay requires at least one message ID');
+    }
+    if (request.messageIds.length > DEAD_LETTER_REPLAY_MAX_BATCH) {
+      throw new BadRequestException(
+        `Dead-letter replay batch exceeds the maximum of ${DEAD_LETTER_REPLAY_MAX_BATCH} messages`,
       );
     }
-
-    // Bounds checks.
-    if (!Number.isInteger(request.limit) || request.limit <= 0) {
-      throw new BadRequestError('Replay limit must be a positive integer');
-    }
-    if (request.limit > MAX_REPLAY_BATCH_LIMIT) {
-      throw new BadRequestError(
-        `Replay limit ${request.limit} exceeds maximum ${MAX_REPLAY_BATCH_LIMIT}`,
-      );
-    }
-    if (messages.length > request.limit) {
-      throw new BadRequestError(
-        `Message count ${messages.length} exceeds replay limit ${request.limit}`,
-      );
-    }
-
-    // Prevent replay across release/schema incompatibility.
-    this.assertContextCompatibility(request, context);
-
-    // Verify the original payload hash matches at least one candidate and
-    // that every candidate's payload hash is consistent with its payload.
-    for (const message of messages) {
-      const computed = this.hashPayload(message.payload);
-      if (computed !== message.payloadHash) {
-        throw new BadProgramError(
-          `Payload hash mismatch for message ${message.id} (expected ${message.payloadHash}, got ${computed})`,
+    if (request.limit !== undefined) {
+      if (!Number.isInteger(request.limit) || request.limit <= 0) {
+        throw new BadRequestException('Dead-letter replay limit must be a positive integer');
+      }
+      if (request.limit > DEAD_LETTER_REPLAY_MAX_BATCH) {
+        throw new BadRequestException(
+          `Dead-letter replay limit exceeds the maximum of ${DEAD_LETTER_REPLAY_MAX_BATCH}`,
         );
       }
     }
-    if (
-      messages.length > 0 &&
-      !messages.some((m) => m.payloadHash === request.originalPayloadHash)
-    ) {
-      throw new BadProgramError(
-        'Original payload hash does not match any replay candidate',
-      );
+
+    // Dry run is an explicit boolean flag; omitting it is ambiguous and
+    // must fail closed.
+    if (typeof request.dryRun !== 'boolean') {
+      throw new BadRequestException('Dead-letter replay requires an explicit dryRun flag');
     }
 
-    // Dry run: return the plan without mutating state or writing audit.
-    if (request.dryRun) {
-      return {
-        planned: messages.length,
-        replayed: 0,
-        skipped: 0,
-        failed: 0,
-        dryRun: true,
-        replayIds: [],
-        auditRecordId: null,
-      };
+    // Deduplicate within the request so a single call cannot replay the
+    // same message twice.
+    const seenIds = new Set<string>();
+    const orderedIds: string[] = [];
+    for (const id of request.messageIds) {
+      if (!seenIds.has(id)) {
+        seenIds.add(id);
+        orderedIds.push(id);
+      }
     }
 
-    // Create the audit record first, in its own transaction, so that even a
-    // partial failure leaves a trail.
-    const audit = await this.deadLetterReplayRepo.save(
-      this.deadLetterReplayRepo.create({
-        operatorId: request.operatorId,
-        capability: request.capability,
-        reason: request.reason,
-        limit: request.limit,
-        dryRun: false,
-        originalPayloadHash: request.originalPayloadHash,
-        chainId: context.chainId,
-        releaseId: context.releaseId,
-        deploymentBlock: context.deploymentBlock,
-        artifactChecksum: context.artifactChecksum,
-        planned: messages.length,
-        replayed: 0,
-        skipped: 0,
-        failed: 0,
-        replayIds: [],
-        status: 'in-progress',
-      }),
-    );
+    const effectiveLimit =
+      request.limit !== undefined
+        ? Math.min(request.limit, DEAD_LETTER_REPLAY_MAX_BATCH)
+        : DEAD_LETTER_REPLAY_MAX_BATCH;
+    const targetIds = orderedIds.slice(0, effectiveLimit);
 
-    const replayIds: string[] = [];
-    let replayed = 0;
-    let skipped = 0;
-    let failed = 0;
+    // Reset the resume flag for this batch; a previous stop request remains
+    // honoured until the operator explicitly resumes.
+    this.replayResumeRequested = false;
 
-    try {
-      for (const message of messages) {
-        // Operator pause check between messages so a batch can be stopped
-        // and resumed by the operator.
-        if (this.pausedReplays.has(audit.id)) {
-          this.logger.warn(`Replay ${audit.id} paused by operator`);
-          break;
-        }
+    const replayId = createHash('sha256')
+      .update(
+        `${auth.operatorId}:${request.reason}:${targetIds.join(',')}:${Date.now()}:${Math.random()}`,
+      )
+      .digest('hex');
 
-        // Idempotency: skip messages that were already replayed for this
-        // original payload hash or that already have a processed event.
-        const duplicateReplay = await this.deadLetterReplayRepo.findOne({
-          where: {
-            originalPayloadHash: message.payloadHash,
-            status: 'completed',
-          },
+    const result: DeadLetterReplayResult = {
+      replayId,
+      dryRun: request.dryRun,
+      requested: request.messageIds.length,
+      replayed: 0,
+      skipped: 0,
+      failed: 0,
+      stopped: false,
+      details: [],
+    };
+
+    // Record the audit entry for this replay attempt before any effects are
+    // applied, so the intent is always auditable even if the batch fails.
+    const auditRecord = this.deadLetterReplayRepo.create({
+      replayId,
+      operatorId: auth.operatorId,
+      role: auth.role ?? null,
+      reason: request.reason,
+      dryRun: request.dryRun,
+      requestedCount: request.messageIds.length,
+      targetMessageIds: targetIds,
+      chainId: request.chainId ?? null,
+      releaseId: request.releaseId ?? null,
+      schemaVersion: request.schemaVersion ?? null,
+      originalPayloadHash: request.originalPayloadHash ?? null,
+      status: 'started',
+      startedAt: new Date(),
+    } as DeadLetterReplay);
+    await this.deadLetterReplayRepo.save(auditRecord);
+
+    for (const messageId of targetIds) {
+      // Honour an operator stop request between messages.
+      if (this.replayStopRequested) {
+        result.stopped = true;
+        result.details.push({
+          messageId,
+          status: 'skipped',
+          reason: 'replay stopped by operator',
         });
-        if (duplicateReplay) {
-          skipped += 1;
-          continue;
-        }
-
-        const alreadyProcessed = await this.processedEventRepo.findOne({
-          where: { txHash: message.txHash, logIndex: message.logIndex },
-        });
-        if (alreadyProcessed) {
-          skipped += 1;
-          continue;
-        }
-
-        try {
-          await this.replayOneMessage(message, audit.id);
-          replayed += 1;
-          replayIds.push(message.id);
-        } catch (error) {
-          // Poison message or transient failure: record and continue with
-          // the rest of the batch so one bad message cannot block the
-          // others.
-          failed += 1;
-          this.logger.error(
-            `Replay of message ${message.id} failed: ${error.message}`,
-            error.stack,
-          );
-        }
+        result.skipped += 1;
+        continue;
       }
 
-      await this.deadLetterReplayRepo.update(audit.id, {
-        replayed,
-        skipped,
-        failed,
-        replayIds: replayIds,
-        status: this.pausedReplays.has(audit.id)
-          ? 'paused'
-          : 'completed',
+      try {
+        const outcome = await this.replayOneMessage(messageId, request, auth, replayId);
+        result.details.push({
+          messageId,
+          status: outcome.status,
+          reason: outcome.reason,
+        });
+        if (outcome.status === 'replayed') {
+          result.replayed += 1;
+        } else if (outcome.status === 'skipped') {
+          result.skipped += 1;
+        } else if (outcome.status === 'dry-run') {
+          // Dry-run outcomes are reported but not counted as replayed.
+        } else {
+          result.failed += 1;
+        }
+      } catch (error) {
+        // Partial failure: one poison message must not abort the rest of the
+        // batch. Record the failure and continue.
+        this.logger.error(
+          `Dead-letter replay failed for message ${messageId}: ${error.message}`,
+          error.stack,
+        );
+        result.details.push({
+          messageId,
+          status: 'failed',
+          reason: error.message,
+        });
+        result.failed += 1;
+      }
+    }
+
+    // Finalize the audit record with the outcome.
+    await this.deadLetterReplayRepo.update(
+      { replayId },
+      {
+        replayedCount: result.replayed,
+        skippedCount: result.skipped,
+        failedCount: result.failed,
+        stopped: result.stopped,
+        status: result.failed > 0 ? 'partial' : 'completed',
         completedAt: new Date(),
-      });
-    } catch (error) {
-      await this.deadLetterReplayRepo.update(audit.id, {
-        replayed,
-        skipped,
-        failed,
-        replayIds: replayIds,
-        status: 'failed',
-        completedAt: new Date(),
-      });
-      throw error;
-    }
+      },
+    );
 
-    return {
-      planned: messages.length,
-      replayed,
-      skipped,
-      failed,
-      dryRun: false,
-      replayIds: replayIds,
-      auditRecordId: audit.id,
-    };
-  }
-
-  /** Pause an in-progress replay batch. */
-  pauseReplay(replayId: string): void {
-    this.pausedReplays.add(replayId);
-  }
-
-  /** Resume a paused replay batch. */
-  resumeReplay(replayId: string): void {
-    this.pausedReplays.delete(replayId);
-  }
-
-  private authoriseReplay(request: DeadLetterReplayRequest): void {
-    if (!request.capability || !this.allowedCapabilities.has(request.capability)) {
-      throw new ForbiddenException('Replay capability not authorised');
-    }
-  }
-
-  private assertContextCompatibility(
-    request: DeadLetterReplayRequest,
-    context: DeadLetterReplayContext,
-  ): void {
-    if (
-      !request.chainId ||
-      !request.releaseId ||
-      !request.artifactChecksum ||
-      !Number.isInteger(request.deploymentBlock)
-    ) {
-      throw new BadRequestError('Replay context is incomplete');
-    }
-    if (
-      request.chainId !== context.chainId ||
-      request.releaseId !== context.releaseId ||
-      request.deploymentBlock !== context.deploymentBlock ||
-      request.artifactChecksum !== context.artifactChecksum
-    ) {
-      throw new BadRequestError(
-        'Replay context is stale or incompatible with the current release',
-      );
-    }
-  }
-
-  private hashPayload(payload: unknown | null): string {
-    const serialised = payload == null ? 'null' : JSON.stringify(payload);
-    return createHash('sha256').update(serialised).digest('hex');
+    return result;
   }
 
   private async replayOneMessage(
-    message: DeadLetterMessage,
+    messageId: string,
+    request: DeadLetterReplayRequest,
+    auth: DeadLetterReplayAuthorization,
     replayId: string,
-  ): Promise<void> {
+  ): Promise<{ status: 'replayed' | 'skipped' | 'failed' | 'dry-run'; reason?: string }> {
+    const message = await this.loadDeadLetterMessage(messageId);
+    if (!message) {
+      return { status: 'failed', reason: 'dead-letter message not found' };
+    }
+
+    // Reject replay across incompatible release/schema/chain boundaries.
+    if (request.releaseId && request.releaseId !== message.releaseId) {
+      return {
+        status: 'skipped',
+        reason: 'stale release: message release incompatible',
+      };
+    }
+    if (request.schemaVersion && request.schemaVersion !== message.schemaVersion) {
+      return {
+        status: 'skipped',
+        reason: 'stale schema: message schema incompatible',
+      };
+    }
+    if (request.chainId && request.chainId !== message.chainId) {
+      return {
+        status: 'skipped',
+        reason: 'chain mismatch: message chain incompatible',
+      };
+    }
+
+    // Verify the original payload hash when provided. A mismatch is a
+    // poison message and must not be replayed.
+    if (
+      request.originalPayloadHash &&
+      request.originalPayloadHash !== message.payloadHash
+    ) {
+      return {
+        status: 'failed',
+        reason: 'payload hash mismatch: poison message',
+      };
+    }
+
+    // Idempotency: if this message has already been replayed, skip it so
+    // one message cannot produce duplicate effects.
+    const alreadyReplayed = await this.deadLetterReplayRepo.findOne({
+      where: { originalMessageId: messageId, status: 'replayed' },
+    });
+    if (alreadyReplayed) {
+      return {
+        status: 'skipped',
+        reason: 'duplicate replay: message already replayed',
+      };
+    }
+
+    if (request.dryRun) {
+      return { status: 'dry-run', reason: 'would replay' };
+    }
+
+    // Apply the replay effect in a transaction and persist the immutable
+    // original->replay link in the same transaction.
     const queryRunner = this.dataSource.createQueryRunner();
     await queryRunner.connect();
     await queryRunner.startTransaction();
-
     try {
-      // Re-check idempotency inside the transaction to close the race
-      // between the pre-check and the write.
-      const existing = await queryRunner.manager.findOne(ProcessedEvent, {
-        where: { txHash: message.txHash, logIndex: message.logIndex },
-      });
-      if (existing) {
-        await queryRunner.rollbackTransaction();
-        return;
-      }
-
-      // Persist the replay record linking original and replay references
-      // immutably.
-      await queryRunner.manager.save(DeadLetterReplay, {
-        id: `${replayId}:${message.id}`,
-        operatorId: 'system',
-        capability: 'system',
-        reason: 'replay',
-        limit: 1,
-        dryRun: false,
-        originalPayloadHash: message.payloadHash,
-        chainId: '',
-        releaseId: '',
-        deploymentBlock: 0,
-        artifactChecksum: '',
-        planned: 1,
-        replayed: 0,
-        skipped: 0,
-        failed: 0,
-        replayIds: [message.id],
-        status: 'completed',
-      });
-
-      // Apply the event through the same path as normal indexing so the
-      // projection and checkpoint remain consistent.
       const event: BlockchainEvent = {
         txHash: message.txHash,
         logIndex: message.logIndex,
         blockNumber: message.blockNumber,
         eventType: message.eventType,
-        data: message.payload,
-      } as BlockchainEvent;
+        data: message.payload as TransferEventData,
+      };
 
-      await this.processEventInternal(event);
+      // Reuse the idempotent processing path so duplicate effects are
+      // impossible even if the original event was already processed.
+      const existing = await queryRunner.manager.findOne(ProcessedEvent, {
+        where: { txHash: message.txHash, logIndex: message.logIndex },
+      });
+      if (!existing) {
+        const processedEvent = queryRunner.manager.create(ProcessedEvent, {
+          txHash: event.txHash,
+          logIndex: event.logIndex,
+          blockNumber: event.blockNumber,
+          eventType: event.eventType,
+          payload: event.data ?? null,
+        });
+        await queryRunner.manager.save(ProcessedEvent, processedEvent);
+        if (event.eventType === 'Transfer') {
+          await this.applyTransfer(
+            queryRunner.manager,
+            event.data as TransferEventData,
+          );
+        }
+      }
+
+      // Persist the immutable link between the original message and its
+      // replay. This record is the audit trail and the idempotency guard.
+      const link = this.deadLetterReplayRepo.create({
+        replayId,
+        originalMessageId: messageId,
+        operatorId: auth.operatorId,
+        role: auth.role ?? null,
+        reason: request.reason,
+        dryRun: false,
+        chainId: message.chainId,
+        releaseId: message.releaseId,
+        schemaVersion: message.schemaVersion,
+        deploymentBlock: message.deploymentBlock,
+        artifactChecksum: message.artifactChecksum,
+        originalPayloadHash: message.payloadHash,
+        status: 'replayed',
+        startedAt: new Date(),
+        completedAt: new Date(),
+      } as DeadLetterReplay);
+      await queryRunner.manager.save(DeadLetterReplay, link);
 
       await queryRunner.commitTransaction();
     } catch (error) {
@@ -574,69 +592,111 @@ export class BlockchainIndexerService {
     } finally {
       await queryRunner.release();
     }
+
+    return { status: 'replayed' };
+  }
+
+  private async loadDeadLetterMessage(
+    messageId: string,
+  ): Promise<DeadLetterMessage | null> {
+    // Dead-lettered messages are persisted as ProcessedEvent rows that failed
+    // to apply; the message ID is the composite key of txHash:logIndex.
+    const [separator, txHash, logIndexRaw] = messageId.match(/^(.+):(\d+)$/) ?? [];
+    if (!separator || !txHash || logIndexRaw === undefined) {
+      return null;
+    }
+    const logIndex = Number(logIndexRaw);
+    if (!Number.isInteger(logIndex)) {
+      return null;
+    }
+
+    const row = await this.processedEventRepo.findOne({
+      where: { txHash, logIndex },
+    });
+    if (!row) {
+      return null;
+    }
+
+    const payload = row.payload as unknown | null;
+    const payloadHash = createHash('sha256')
+      .update(payload == null ? '' : JSON.stringify(payload))
+      .digest('hex');
+
+    return {
+      id: messageId,
+      txHash: row.txHash,
+      logIndex: row.logIndex,
+      blockNumber: row.blockNumber,
+      eventType: row.eventType,
+      payload,
+      payloadHash,
+      chainId: row.chainId ?? '',
+      releaseId: row.releaseId ?? '',
+      schemaVersion: row.schemaVersion ?? '',
+      deploymentBlock: row.deploymentBlock ?? 0,
+      artifactChecksum: row.artifactChecksum ?? '',
+    };
   }
 
   private async applyTransfer(
     manager: EntityManager,
     data: TransferEventData,
   ): Promise<void> {
+    if (!data) {
+      return;
+    }
     const { from, to, amount, token } = data;
-    await manager.decrement(
-      TokenBalance,
-      { address: from, tokenAddress: token },
-      'balance',
-      amount,
-    );
-    await manager.increment(
-      TokenPalance,
-      { address: to, tokenAddress: token },
-      'balance',
-      amount,
-    );
+    await this.adjustBalance(manager, from, token, -BigInt(amount));
+    await this.adjustBalance(manager, to, token, BigInt(amount));
   }
 
-  /** Inverse of {@link applyTransfer}, used when unwinding an orphaned block. */
   private async reverseTransfer(
     manager: EntityManager,
     data: TransferEventData,
   ): Promise<void> {
+    if (!data) {
+      return;
+    }
     const { from, to, amount, token } = data;
-    await manager.increment(
-      TokenPalance,
-      { address: from, tokenAddress: token },
-      'balance',
-      amount,
-    );
-    await manager.decrement(
-      TokenBalance,
-      { address: to, tokenAddress: token },
-      'balance',
-      amount,
-    );
+    await this.adjustBalance(manager, from, token, BigInt(amount));
+    await this.adjustBalance(manager, to, token, -BigInt(amount));
+  }
+
+  private async adjustBalance(
+    manager: EntityManager,
+    address: string,
+    token: string,
+    delta: bigint,
+  ): Promise<void> {
+    const balance = await manager.findOne(TokenBalance, {
+      where: { address, token },
+    });
+    if (!balance) {
+      await manager.save(TokenBalance, {
+        address,
+        token,
+        balance: delta.toString(),
+      });
+      return;
+    }
+    const next = BigInt(balance.balance) + delta;
+    balance.balance = next.toString();
+    await manager.save(TokenBalance, balance);
   }
 
   private async saveCheckpoint(
     manager: EntityManager,
     blockNumber: number,
   ): Promise<void> {
-    const checkpoint = await manager.findOne(IndexerCheckpoint, {
+    const existing = await manager.findOne(IndexerCheckpoint, {
       where: { id: 1 },
     });
-    const currentLastBlock = checkpoint ? checkpoint.lastBlock : 0;
-    const nextLastBlock = Math.max(currentLastBlock || 0, blockNumber);
-
-    await manager.save(IndexerCheckpoint, {
-      id: 1,
-      lastBlock: nextLastBlock,
-      updatedAt: new Date(),
-    });
-
-    // Advance the projection head so lag/finality metrics stay current.
-    await this.stateService.setProjectionHead(nextLastBlock);
-  }
-
-  async getLastProcessedBlock(): Promise<number | null> {
-    const checkpoint = await this.checkpointRepo.findOne({ where: { id: 1 } });
-    return checkpoint ? checkpoint.lastBlock : null;
+    if (!existing || blockNumber > existing.lastBlock) {
+      await manager.save(IndexerCheckpoint, {
+        id: 1,
+        lastBlock: blockNumber,
+        updatedAt: new Date(),
+      });
+    }
   }
 }

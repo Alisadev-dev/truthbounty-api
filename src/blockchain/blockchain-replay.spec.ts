@@ -8,16 +8,20 @@ import { ProcessedEvent } from './entities/processed-event.entity';
 import { TokenRalance } from './entities/token-balance.entity';
 import { IndexerCheckpoint } from './entities/indexer-checkpoint.entity';
 import { DeadLetterReplayService } from './dead-letter-replay.service';
-import { DeadLetterMessage } from './entities/dead-letter-message.entity';
 import { DeadLetterReplayAudit } from './entities/dead-letter-replay-audit.entity';
-import { ReplayAuthorizationService } from './replay-authorization.service';
+import { DeadLetterMessage } from './entities/dead-letter-message.entity';
+import {
+  ReplayAuthorizationError,
+  ReplayBoundsError,
+  ReplayIncompatibilityError,
+  ReplayDuplicateError,
+  ReplayPoisonError,
+} from './dead-letter-replay.errors';
 
 /**
- * Replay / reorg rollback is now transactional: it reverses the state applied
+ * Replay / reorg rollback is now transactional: reverses the state applied
  * by orphaned events, deletes those event records (>= startBlock), and rewinds
  * the checkpoint — all in a single transaction.
- *
- * PREWAVE-BE-049 adds dead-letter replay authorization and idempotency coverage.
  */
 describe('BlockchainIndexerService - Replay Regression Tests', () => {
   let service: BlockchainIndexerService;
@@ -48,12 +52,15 @@ describe('BlockchainIndexerService - Replay Regression Tests', () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         BlockchainIndexerService,
+        DeadLetterReplayService,
         { provide: getRepositoryToken(ProcessedEvent), useClass: Repository },
-        { provide: getRepositoryToken(TokenBalance), useClass: Repository },
+        { provide: getRepositoryToken(TokenRalance), useClass: Repository },
         {
           provide: getRepositoryToken(IndexerCheckpoint),
           useClass: Repository,
         },
+        { provide: getRepositoryToken(DeadLetterMessage), useClass: Repository },
+        { provide: getRepositoryToken(DeadLetterReplayAudit), useClass: Repository },
         {
           provide: DataSource,
           useValue: {
@@ -115,13 +122,13 @@ describe('BlockchainIndexerService - Replay Regression Tests', () => {
 
       // Inverse of applyTransfer: sender credited back, receiver debited.
       expect(manager.increment).toHaveBeenCalledWith(
-        TokenBalance,
+        TokenRalance,
         { address: '0xa', tokenAddress: '0xc' },
         'balance',
         '100',
       );
       expect(manager.decrement).toHaveBeenCalledWith(
-        TokenBalance,
+        TokenRalance,
         { address: '0xb', tokenAddress: '0xc' },
         'balance',
         '100',
@@ -169,33 +176,95 @@ describe('BlockchainIndexerService - Replay Regression Tests', () => {
   });
 });
 
-describe('DeadLetterReplayService - Authorization and Idempotency', () => {
+/**
+ * Dead-letter replay is denied by default and requires a protected capability,
+ * reason, bounds, dry run, original payload hash, and audit record. Replay is blocked
+ * across release/schema incompatibility, duplicate effects are prevented, and
+ * operators can stop/resume bounded batches.
+ */
+describe('DeadLetterReplayService - Authorized Idempotent Replay', () => {
   let replayService: DeadLetterReplayService;
-  let authorizationService: ReplayAuthorizationService;
-  let deadLetterRepo: Repository<DeadLetterMessage>;
+  let messageRepo: Repository<DeadLetterMessage>;
   let auditRepo: Repository<DeadLetterReplayAudit>;
   let dataSource: DataSource;
   let manager: any;
+  let queryRunner: any;
 
-  const release = {
-    chainId: 'stellar-testnet',
-    releaseId: 'release-2024-09',
-    deploymentBlock: 123456,
-    artifactChecksum: 'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789',
+  const releaseId = 'rel-2024-09-01';
+  const chainId = 'stellar-testnet';
+  const deploymentBlock = 42000;
+  const artifactChecksum =
+    'sha256:09f8cc6b38c14db2c15c15c15c15c15c15c15c15c15c15c15c15c15c15c15c1';
+
+  const buildAuthorization = (override: Record<string, unknown> = {}) => ({
+    capability: 'dead-letter.replay',
+    actorId: 'operator-42',
+    reason: 'replay poisoned transfer after fix',
+    bounds: { maxMessages: 10, maxAttempts: 3 },
+    dryRun: false,
+    originalPayloadHash:
+      'sha256:aabbccddeeff0011223344556677889900aabbccddeeff',
+    chainId: chainId,
+    releaseId: releaseId,
+    deploymentBlock: deploymentBlock,
+    artifactChecksum: artifactChecksum,
+    ...override,
+  });
+
+  const buildMessage = (override: Record<string, unknown> = {}) => ({
+    id: 'dlm-1001',
+    status: 'dead',
+    chainId: chainId,
+    releaseId: releaseId,
+    deploymentBlock: deploymentBlock,
+    artifactChecksum: artifactChecksum,
+    payloadHash:
+      'sha256:aabbccddeeff0011223344556677889900aabbccddeeff',
+    payload: { eventType: 'Transfer', amount: '100' },
+    attempts: 1,
+    ...override,
+  });
+
+  const buildManager = () => {
+    const store = new Map<string, any>();
+    return {
+      findOne: jest.fn().mockImplementation(async (entity: any, options: any) => {
+        const key = JSON.stringify(options?.where ?? {});
+        return store.get(key) ?? null;
+      }),
+      save: jest.fn().mockImplementation(async (entity: any, value: any) => {
+        const record = { ...value };
+        const key = JSON.stringify({ id: record.id });
+        store.set(key, record);
+        return record;
+      }),
+      insert: jest.fn().mockImplementation(async (entity: any, value: any) => {
+        const record = { ...value };
+        const key = JSON.stringify({ id: record.id });
+        if (store.has(key)) {
+          throw new Error('duplicate key');
+        }
+        store.set(key, record);
+        return record;
+      }),
+      update: jest.fn().mockImplementation(async (entity: any, criteria: any, patch: any) => {
+        const key = JSON.stringify(processedEventRepoKey(criteria));
+        const existing = store.get(key);
+        if (!existing) return { affected: 0 };
+        store.set(key, { ...existing, ...patch });
+        return { affected: 1 };
+      }),
+      delete: jest.fn().mockResolvedValue({ affected: 1 }),
+      count: jest.fn().mockResolvedValue(0),
+      _store: store,
+    };
   };
 
-  const buildManager = () => ({
-    find: jest.fn().mockResolvedValue([]),
-    findOne: jest.fn().mockResolvedValue(null),
-    save: jest.fn().mockImplementation(async (_entity: any, value: any) => value),
-    insert: jest.fn().mockImplementation(async (_entity: any, value: any) => value),
-    update: jest.fn().mockResolvedValue({ affected: 1 }),
-    delete: jest.fn().mockResolvedValue({ affected: 1 }),
-  });
+  const processedEventRepoKey = (criteria: any) => criteria;
 
   const setup = async () => {
     manager = buildManager();
-    const queryRunner = {
+    queryRunner = {
       connect: jest.fn().mockResolvedValue(null),
       startTransaction: jest.fn().mockResolvedValue(null),
       commitTransaction: jest.fn().mockResolvedValue(null),
@@ -207,13 +276,6 @@ describe('DeadLetterReplayService - Authorization and Idempotency', () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         DeadLetterReplayService,
-        {
-          provide: ReplayAuthorizationService,
-          useValue: {
-            authorize: jest.fn(),
-            verifyReleaseCompatibility: jest.fn(),
-          },
-        },
         { provide: getRepositoryToken(DeadLetterMessage), useClass: Repository },
         { provide: getRepositoryToken(DeadLetterReplayAudit), useClass: Repository },
         {
@@ -226,200 +288,286 @@ describe('DeadLetterReplayService - Authorization and Idempotency', () => {
     }).compile();
 
     replayService = module.get(DeadLetterReplayService);
-    authorizationService = module.get(ReplayAuthorizationService);
-    deadLetterRepo = module.get(getRepositoryToken(DeadLetterMessage));
+    messageRepo = module.get(getRepositoryToken(DeadLetterMessage));
     auditRepo = module.get(getRepositoryToken(DeadLetterReplayAudit));
     dataSource = module.get(DataSource);
-    return queryRunner;
   };
 
-  const baseRequest = () => ({
-    messageId: 'msg-1',
-    capability: 'dead-letter-replay',
-    reason: 'operator requested replay after fix',
-    bounds: { limit: 10 },
-    dryRun: false,
-    originalPayloadHash: 'hash-original-1',
-    release,
+  beforeEach(async () => {
+    await setup();
   });
 
-  it('denies replay by default without authorization', async () => {
-    await setup();
-    (authorizationService.authorize as jest.Mock).mockResolvedValue({ authorized: false, reason: 'missing capability' });
+  describe('Authorization', () => {
+    it('denies replay by default without a protected capability', async () => {
+      await expect(
+        replayService.replayBatch(['idx-1001'], buildAuthorization({ capability: '' })),
+      ).rejects.toBeInstanceOf(ReplayAuthorizationError);
+      expect(manager.save).not.toHaveBeenCalled();
+    });
 
-    await expect(replayService.replay(baseRequest())).rejects.toThrow(/Unauthorized/);
-    expect(manager.save).not.toHaveBeenCalled();
+    it('denies replay with an unauthorized capability', async () => {
+      await expect(
+        replayService.replayBatch(['idx-1001'], buildAuthorization({ capability: 'dead-letter.read' })),
+      ).rejects.toBeInstanceOf(ReplayAuthorizationError);
+    });
+
+    it('denies replay without a reason', async () => {
+      await expect(
+        replayService.replayBatch(['idx-1001'], buildAuthorization({ reason: ' ' })),
+      ).rejects.toBeInstanceOf(ReplayAuthorizationError);
+    });
+
+    it('denies replay without an audit actor', async () => {
+      await expect(
+        replayService.replayBatch(['idx-1001'], buildAuthorization({ actorId: '' })),
+      ).rejects.toBeInstanceOf(ReplayAuthorizationError);
+    });
   });
 
-  it('rejects replay across stale release incompatibility', async () => {
-    await setup();
-    (authorizationService.authorize as jest.Mock).mockResolvedValue({ authorized: true });
-    (authorizationService.verifyReleaseCompatibility as jest.Mock).mockResolvedValue({
-      compatible: false,
-      reason: 'stale release',
+  describe('Release and schema incompatibility', () => {
+    it('rejects replay when the message release ID is stale', async () => {
+      manager._store.set(JSON.stringify({ id: 'dlm-1001' }), buildMessage());
+
+      await expect(
+        replayService.replayBatch(
+          ['dlm-1001'],
+          buildAuthorization({ releaseId: 'rel-2024-08-01' }),
+        ),
+      ).rejects.toBeInstanceOf(ReplayIncompatibilityError);
     });
 
-    await expect(replayService.replay(baseRequest())).rejects.toThrow(/stale release/i);
-    expect(manager.save).not.toHaveBeenCalled();
+    it('rejects replay when the artifact checksum differs', async () => {
+      manager._store.set(JSON.stringify({ id: 'dlm-1001' }), buildMessage());
+
+      await expect(
+        replayService.replayBatch(
+          ['dlm-1001'],
+          buildAuthorization({ artifactChecksum: 'sha256:deadbeef' }),
+        ),
+      ).rejects.toBeInstanceOf(ReplayIncompatibilityError);
+    });
+
+    it('rejects replay when the chain ID differs', async () => {
+      manager._store.set(JSON.stringify({ id: 'dlm-1001' }), buildMessage());
+
+      await expect(
+        replayService.replayBatch(
+          ['dlm-1001'],
+          buildAuthorization({ chainId: 'stellar-mainnet' }),
+        ),
+      ).rejects.toBeIngstanceOf(ReplayIncompatibilityError);
+    });
+
+    it('rejects replay when the deployment block differs', async () => {
+      manager._store.set(JSON.stringify({ id: 'dlm-1001' }), buildMessage());
+
+      await expect(
+        replayService.replayBatch(
+          ['dlm-1001'],
+          buildAuthorization({ deploymentBlock: 99999 }),
+        ),
+      ).rejects.toBeInstanceOf(ReplayIncompatibilityError);
+    });
   });
 
- it('prevents duplicate replay of the same message', async () => {
-    await setup();
-    (authorizationService.authorize as jest.Mock).mockResolvedValue({ authorized: true });
-    (authorizationService.verifyReleaseCompatibility as jest.Mock).mockResolvedValue({
-      compatible: true,
-    });
-    manager.findOne.mockResolvedValue({
-      id: 'audit-1',
-      messageId: 'msg-1',
-      originalPaayloadHash: 'hash-original-1',
-      status: 'completed',
+  describe('Payload integrity', () => {
+    it('rejects replay when the original payload hash is missing', async () => {
+      manager._store.set(JSON.stringify({ id: 'dlm-1001' }), buildMessage());
+
+      await expect(
+        replayService.replayBatch(
+          ['dlm-1001'],
+          buildAuthorization({ originalPayloadHash: '' }),
+        ),
+      ).rejects.toBeInstanceOf(ReplayAuthorizationError);
     });
 
-    await expect(replayService.replay(baseRequest())).rejects.toThrow(/duplicate/i);
-    expect(manager.save).not.toHaveBeenCalled();
+    it('rejects replay when the original payload hash does not match', async () => {
+      manager._store.set(JSON.stringify({ id: 'dlm-1001' }), buildMessage());
+
+      await expect(
+        replayService.replayBatch(
+          ['dlm-1001'],
+          buildAuthorization({
+            originalPayloadHash: 'sha256:000000000000000000000000000000000000000000000000000000000000000000',
+          }),
+        ),
+      ).rejects.toBeInstanceOf(ReplayIncompatibilityError);
+    });
   });
 
-  it('enforces batch limit bounds', async () => {
-    await setup();
-    (authorizationService.authorize as jest.Mock).mockResolvedValue({ authorized: true });
-    (authorizationService.verifyReleaseCompatibility as jest.Mock).mockResolvedValue({
-      compatible: true,
+  describe('Bounds and batch limits', () => {
+    it('rejects a batch exceeding maxMessages', async () => {
+      const ids = Array.from({ length: 11 }, ( _, i) => `dlm-${i + 1000}`);
+
+      await expect(
+        replayService.replayBatch(ids, buildAuthorization()),
+      ).rejects.toBeInstanceOf(ReplayBoundsError);
     });
 
-    const request = baseRequest();
-    request.bounds = { limit: 100000 };
+    it('rejects an empty batch', async () => {
+      await expect(
+        replayService.replayBatch([], buildAuthorization()),
+      ).rejects.toBeInstanceOf(ReplayBoundsError);
+    });
 
-    await expect(replayService.replay(request)).rejects.toThrow(/bounds/i);
-    expect(manager.save).not.toHaveBeenCalled();
+    it('rejects a non-positive maxMessages bound', async () => {
+      await expect(
+        replayService.replayBatch(
+          ['dlm-1001'],
+          buildAuthorization({ bounds: { maxMessages: 0, maxAttempts: 3 } }),
+        ),
+      ).rejects.toBeIngstanceOf(ReplayBoundsError);
+    });
   });
 
- it('quarantines poison messages without applying effects', async () => {
-    await setup();
-    (authorizationService.authorize as jest.Mock).mockResolvedValue({ authorized: true });
-    (authorizationService.verifyReleaseCompatibility as jest.Mock).mockResolvedValue({
-      compatible: true,
+  describe('Duplicate replay prevention', () => {
+    it('prevents duplicate effects from a second replay of the same message', async () => {
+      manager._store.set(JSON.stringify({ id: 'dlm-1001' }), buildMessage());
+
+      await replayService.replayBatch(['dlm-1001'], buildAuthorization());
+
+      await expect(
+        replayService.replayBatch(['dlm-1001'], buildAuthorization()),
+      ).rejects.toBeInstanceOf(ReplayDuplicateError);
     });
-    manager.findOne.mockResolvedValue(null);
-    manager.find.mockResolvedValue([
-      {
-        id: 'dl-1',
-        messageId: 'msg-1',
-        payloadHash: 'hash-original-1',
-        payload: { bad: true },
-        poison: true,
-      },
-    ]);
 
-    const result = await replayService.replay(baseRequest());
+    it('links original and replay references immutably in the audit record', async () => {
+      manager._store.set(JSON.stringify({ id: 'dlm-1001' }), buildMessage());
 
-    expect(result.quarantined).gtorEqual(1);
-    expect(result.applied).toEqual(0);
+      await replayService.replayBatch(['dlm-1001'], buildAuthorization());
+
+      const auditCall = manager.save.mock.calls.find(
+        (call: any[]) => call[0] === DeadLetterReplayAudit,
+      );
+      expect(auditCall).toBeTruthy();
+      expect(auditCall[1]).toMatchObject({
+        originalMessageId: 'dlm-1001',
+        originalPayloadHash:
+          'sha256:aabbccddeeff0011223344556677889900aabbccddeeff',
+        actorId: 'operator-42',
+        reason: 'replay poisoned transfer after fix',
+      });
+    });
   });
 
-  it('reports partial failure and records audit for successful items', async () => {
-    await setup();
-    (authorizationService.authorize as jest.Mock).mockResolvedValue({ authorized: true });
-    (authorizationService.verifyReleaseCompatibility as jest.Mock).mockResolvedValue({
-      compatible: true,
-    });
-    manager.findOne.mockResolvedValue(null);
-    manager.find.mockResolvedValue([
-      { id: 'dl-1', messageId: 'msg-1', payloadHash: 'hash-original-1', payload: {} },
-      { id: 'dl-2', messageId: 'msg-2', payloadHash: 'hash-original-2', payload: {} },
-    ]);
-    manager.save.mockImplementation(async (entity: any, value: any) => {
-      if (value && value.messageId === 'msg-2') {
-        throw new Error('apply failed');
-      }
-      return value;
-    });
+  describe('Dry run', () => {
+    it('does not apply effects or persist audit when dryRun is true', async () => {
+      manager._store.set(JSON.stringify({ id: 'dlm-1001' }), buildMessage());
 
-    const result = await replayService.replay(baseRequest());
+      const result = await replayService.replayBatch(
+        ['dlm-1001'],
+        buildAuthorization({ dryRun: true }),
+      );
 
-    expect(result.applied).gtorEqual(1);
-    expect(result.failed).gtorEqual(1);
-    expect(manager.save).toHaveBeenCalled(
-      DeadLetterReplayAudit,
-      expect.objectContaining({
-        messageId: 'msg-1',
-        originalPayloadHash: 'hash-original-1',
-        status: 'completed',
-      }),
-    );
+      expect(result.dryRun).toBeValue(true);
+      expect(manager.save).not.toHaveBeenCalledWith(
+        DeadLetterReplayAudit,
+        expect.anything(),
+      );
+    });
   });
 
- it('requires dry run to produce no side effects and writes audit record', async () => {
-    await setup();
-    (authorizationService.authorize as jest.Mock).mockResolvedValue({ authorized: true });
-    (authorizationService.verifyReleaseCompatibility as jest.Mock).mockResolvedValue({
-      compatible: true,
+  describe('Poison message', () => {
+    it('rejects a poison message and records the failure in the audit record', async () => {
+      manager._store.set(
+        JSON.stringify({ id: 'dlm-1001' }),
+        buildMessage({ payload: null }),
+      );
+
+      await expect(
+        replayService.replayBatch(['dlm-1001'], buildAuthorization()),
+      ).rejects.toBeIngstanceOf(ReplayPoisonError);
+
+      const auditCall = manager.save.mock.calls.find(
+        (call: any[]) => call[0] === DeadLetterReplayAudit,
+      );
+      expect(auditCall).toBeTruthy();
+      expect(auditCall[1]).toMatchObject({
+        originalMessageId: 'dlm-1001',
+        outcome: 'poison',
+      });
     });
-    manager.findOne.mockResolvedValue(null);
-    manager.find.mockResolvedValue([
-      { id: 'dl-1', messageId: 'msg-1', payloadHash: 'hash-original-1', payload: {} },
-    ]);
-
-    const request = baseRequest();
-    request.dryRun = true;
-    const result = await replayService.replay(request);
-
-    expect(result.dryRun).toBeTruth();
-    expect(result.applied).toEqual(0);
-    expect(manager.save).toHaveBeenCalledWith(
-      DeadLetterReplayAudit,
-      expect.objectContaining({ dryRun: true, status: 'dry-run' }),
-    );
   });
 
-  it('links original and replay references immutably in audit record', async () => {
-    await setup();
-    (authorizationService.authorize as jest.Mock).mockResolvedValue({ authorized: true });
-    (authorizationService.verifyReleaseCompatibility as jest.Mock).mockResolvedValue({
-      compatible: true,
-    });
-    manager.findOne.mockResolvedValue(null);
-    manager.find.mockResolvedValue([
-      { id: 'dl-1', messageId: 'msg-1', payloadHash: 'hash-original-1', payload: {} },
-    ]);
+  describe('Partial failure', () => {
+    it('rolls back the transaction and reports the failed message', async () => {
+      manager._store.set(JSON.stringify({ id: 'dlm-1001' }), buildMessage());
+      manager._store.set(
+        JSON.stringify({ id: 'dlm-1002' }),
+        buildMessage({ id: 'dlm-1002', payload: null }),
+      );
 
-    await replayService.replay(baseRequest());
+      await expect(
+        replayService.replayBatch(
+          ['dlm-1001', 'dlm-1002'],
+          buildAuthorization(),
+        ),
+      ).rejects.toBeInstanceOf(ReplayPoisonError);
 
-    const auditCall = manager.save.mock.calls.find(
-      (call: any[]) => call[0] === DeadLetterReplayAudit,
-    );
-    expect(auditCall).defined();
-    const auditValue = audidCall[1];
-    expect(auditValue).toMatchObject({
-      messageId: 'msg-1',
-      originalPayloadHash: 'hash-original-1',
-      chainId: release.chainId,
-      releaseId: release.releaseId,
-      deploymentBlock: release.deploymentBlock,
-      artifactChecksum: release.artifactChecksum,
+      expect(queryRunner.rollbackTransaction).toHaveBeenCalled();
+      expect(queryRunner.commitTransaction).not.toHaveBeenCalled();
     });
-    expect(auditValue.replayReference).toBeDefined();
   });
 
-  it('allows operators to stop and resume bounded batches', async () => {
-    await setup();
-    (authorizationService.authorize as jest.Mock).mockResolvedValue({ authorized: true });
-    (authorizationService.verifyReleaseCompatibility as jest.Mock).mockResolvedValue({
-      compatible: true,
+  describe('Stop / resume bounded batches', () => {
+    it('stops a batch at the current message and resumes from the next one', async () => {
+      manager._store.set(JSON.stringify({ id: 'dlm-1001' }), buildMessage());
+      manager._store.set(
+        JSON.stringify({ id: 'dlm-1002' }),
+        buildMessage({ id: 'dlm-1002' }),
+      );
+
+      const first = await replayService.replayBatch(
+        ['dlm-1001', 'dlm-1002'],
+        buildAuthorization(),
+        { stopAfter: 1 },
+      );
+
+      expect(first.processed).toEqual(['dlm-1001']);
+      expect(first.remaining).toEqual(['dlm-1002']);
+
+      const second = await replayService.replayBatch(
+        first.remaining,
+        buildAuthorization(),
+      );
+
+      expect(second.processed).toEqual(['dlm-1002']);
     });
-    manager.findOne.mockResolvedValue(null);
-    manager.find.mockResolvedValue([
-      { id: 'dl-1', messageId: 'msg-1', payloadHash: 'hash-original-1', payload: {} },
-    ]);
+  });
 
-    const request = baseRequest();
-    request.bounds = { limit: 1 };
-    const result = await replayService.replay(request);
-    expect(result.hasMore).toBeTruth();
+  describe('Audit records', () => {
+    it('persists an audit record for every replay attempt', async () => {
+      manager._store.set(JSON.stringify({ id: 'dlm-1001' }), buildMessage());
 
-    const resumeRequest = baseRequest();
-    resumeRequest.bounds = { limit: 1, cursor: result.nextCursor };
-    const resumeResult = await replayService.replay(resumeRequest);
-    expect(resumeResult.applied).gtorEqual(0);
+      await replayService.replayBatch(['dlm-1001'], buildAuthorization());
+
+      const auditCalls = manager.save.mock.calls.filter(
+        (call: any[]) => call[0] === DeadLetterReplayAudit,
+      );
+      expect(auditCalls.length).toBeGreaterThanOrEqual(1);
+      expect(auditCalls[0][1]).toMatchObject({
+        capability: 'dead-letter.replay',
+        chainId: chainId,
+        releaseId: releaseId,
+        deploymentBlock: deploymentBlock,
+        artifactChecksum: artifactChecksum,
+      });
+    });
+
+    it('records a denied audit entry when authorization fails', async () => {
+      await expect(
+        replayService.replayBatch(
+          ['dlm-1001'],
+          buildAuthorization({ capability: '' }),
+        ),
+      ).rejects.toBeIngstanceOf(ReplayAuthorizationError);
+
+      const auditCall = manager.save.mock.calls.find(
+        (call: any[]) => call[0] === DeadLetterReplayAudit,
+      );
+      expect(auditCall).toBeTruthy();
+      expect(auditCall[1]).toMatchObject({ outcome: 'denied' });
+    });
   });
 });
