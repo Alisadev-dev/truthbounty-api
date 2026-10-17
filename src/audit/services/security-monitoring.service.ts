@@ -1,6 +1,6 @@
 import { getRuntimeEnvironment } from '../../config/runtime-config';
 import { Injectable, Logger } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
+import { InjectRepository } from '@nestjs/typeiorm';
 import { Repository, MoreThan, In } from 'typeorm';
 import {
   AuditLog,
@@ -10,6 +10,7 @@ import {
 } from '../entities/audit-log.entity';
 import { SecurityIncident } from '../interfaces/audit-response.interface';
 import { randomUUID } from 'crypto';
+import { SecretDetectionService } from './secret-detection.service';
 
 export interface SecurityThresholds {
   maxFailedLogins: number;
@@ -33,6 +34,7 @@ export class SecurityMonitoringService {
   constructor(
     @InjectRepository(AuditLog)
     private readonly auditLogRepo: Repository<AuditLog>,
+    private readonly secretDetectionService: SecretDetectionService,
   ) {
     this.thresholds = this.loadThresholds();
   }
@@ -68,6 +70,28 @@ export class SecurityMonitoringService {
     }
 
     return null;
+  }
+
+  async scanSupportSubmission(
+    submissionId: string,
+    text: string,
+    attachments: Array<{ name: string; content: Buffer }> = [],
+  ): Promise<{ quarantined: boolean; reason?: string }> {
+    const result = await this.secretDetectionService.scanSubmission(
+      text,
+      attachments,
+    );
+    if (result.detected) {
+      this.logger.warn(
+        `Support submission ${submissionId} quarantined: ${result.category} detected`,
+      );
+      return {
+        quarantined: true,
+        reason:
+          'Your submission contains sensitive material and has been quarantined. Please remove any seed phrases, private keys, tokens, or credentials and resubmit.',
+      };
+    }
+    return { quarantined: false };
   }
 
   async checkPermissionEscalation(

@@ -33,4 +33,18 @@ describe('Docker build configuration', () => {
     expect(packageJson.engines).toBeDefined();
     expect(packageJson.engines.node).toBe('>=20 <21');
   });
+
+  it('enforces explicit generated prerequisites and type checking in builder stage', () => {
+    expect(dockerfile).toContain('RUN npm run generate:prerequisites');
+    expect(dockerfile).toContain('RUN npm run type-check');
+  });
+
+  it('does not exclude test sources from Docker build context in .dockerignore', () => {
+    const dockerignore = readFileSync(join(root, '.dockerignore'), 'utf8');
+    const lines = dockerignore
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l && !l.startsWith('#'));
+    expect(lines).not.toContain('test');
+  });
 });

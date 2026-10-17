@@ -13,6 +13,47 @@ Legacy `RELEASE_MANIFEST_MAX_AGE_MS` must migrate to `CONTRACT_RELEASE_MAX_AGE_D
 | APP_VERSION | non-empty string | dev | no | npm_package_version |
 | NODE_ENV | local / development / test / staging / production | development | no | - |
 | LOCAL_DEV_MODE | true or false | false | no | STAB_LOCAL_MODE |
+| SIWE_ALLOWED_ORIGINS | comma-separated non-empty values | (unset) | no | - |
+| CAPABILITY_TOKEN_SIGNING_KEY | non-empty string | (unset) | yes | - |
+| ADMIN_AUDIT_RETENTION_DAYS | integer 1..3650 | 365 | no | - |
+| SIWE_ALLOWED_DOMAINS | comma-separated non-empty values | (unset) | no | - |
+| SIWE_EXPECTED_STATEMENT | non-empty string | (unset) | no | - |
+| SIWE_SUPPORTED_CHAIN_IDS | comma-separated Optimism chain IDs | (unset) | no | - |
+| OPERATIONS_AUDIT_MAX | integer 1..9007199254740991 | 10000 | no | - |
+| INDEXER_MAX_FINALIZED_LAG_BLOCKS | integer 0..9007199254740991 | 150 | no | - |
+| INDEXER_MAX_HEAD_AGE_SECONDS | integer 0..9007199254740991 | 120 | no | - |
+| INDEXER_RELEASE_ID | non-empty string | (unset) | no | - |
+| INDEXER_DEPLOYMENT_BLOCK | non-negative safe integer | (unset) | no | - |
+| INDEXER_ARTIFACT_CHECKSUM | 64-character lowercase SHA-256 | (unset) | no | - |
+| PUBLIC_STATUS_CACHE_TTL_SECONDS | integer 1..9007199254740991 | 15 | no | - |
+| PUBLIC_STATUS_STALE_AFTER_SECONDS | integer 1..9007199254740991 | 120 | no | - |
+| PUBLIC_STATUS_WEB_HEALTH_URL | URL (https:, http:) | (unset) | no | - |
+| PUBLIC_STATUS_WEB_PROBE_TIMEOUT_MS | integer 1..9007199254740991 | 2000 | no | - |
+| PUBLIC_STATUS_RATE_LIMIT | integer 1..9007199254740991 | 60 | no | - |
+| PUBLIC_STATUS_RATE_WINDOW_SECONDS | integer 1..9007199254740991 | 60 | no | - |
+| ABUSE_SIGNALS_ENABLED | true or false | true | no | - |
+| ABUSE_SIGNALS_ENFORCEMENT_ENABLED | true or false | false | no | - |
+| ABUSE_SIGNALS_SUBJECT_SALT | secret of at least 32 characters | (unset) | no | - |
+| ABUSE_SIGNALS_WINDOW_SECONDS | integer 1..9007199254740991 | 300 | no | - |
+| ABUSE_SIGNALS_MAX_ACTION_SECONDS | integer 1..9007199254740991 | 900 | no | - |
+| ABUSE_SIGNALS_MAX_ACTIONS_PER_SUBJECT | integer 1..9007199254740991 | 3 | no | - |
+| ABUSE_SIGNALS_TRUSTED_PROXY_HOPS | integer 0..9007199254740991 | 0 | no | - |
+| ABUSE_SIGNALS_SCRAPE_MAX_READS | integer 1..9007199254740991 | 600 | no | - |
+| ABUSE_SIGNALS_SCRAPE_MAX_ROUTES | integer 1..9007199254740991 | 40 | no | - |
+| ABUSE_SIGNALS_STUFFING_MAX_FAILURES | integer 1..9007199254740991 | 20 | no | - |
+| ABUSE_SIGNALS_STUFFING_MAX_DISTINCT_CREDENTIALS | integer 1..9007199254740991 | 5 | no | - |
+| ABUSE_SIGNALS_STUFFING_MAX_DISTINCT_SUBJECTS | integer 1..9007199254740991 | 10 | no | - |
+| ABUSE_SIGNALS_SPAM_MAX_WRITES | integer 1..9007199254740991 | 30 | no | - |
+| ABUSE_SIGNALS_SPAM_MAX_DUPLICATE_PAYLOADS | integer 1..9007199254740991 | 10 | no | - |
+| ABUSE_SIGNALS_WEBHOOK_MAX_ENDPOINT_WRITES | integer 1..9007199254740991 | 15 | no | - |
+| ABUSE_SIGNALS_WEBHOOK_MAX_SECRET_ROTATIONS | integer 1..9007199254740991 | 5 | no | - |
+| ABUSE_SIGNALS_WEBHOOK_MAX_DELIVERIES | integer 1..9007199254740991 | 200 | no | - |
+| ABUSE_SIGNALS_STREAM_MAX_CONNECTIONS | integer 1..9007199254740991 | 25 | no | - |
+| ABUSE_SIGNALS_STREAM_MAX_SUBSCRIBE_OPS | integer 1..9007199254740991 | 60 | no | - |
+| ABUSE_SIGNALS_STREAM_MAX_MESSAGES | integer 1..9007199254740991 | 300 | no | - |
+| ABUSE_SIGNALS_SUPPORT_MAX_REQUESTS | integer 1..9007199254740991 | 30 | no | - |
+| ABUSE_SIGNALS_SUPPORT_MAX_DUPLICATE_REQUESTS | integer 1..9007199254740991 | 20 | no | - |
+| ABUSE_SIGNALS_SUPPORT_MAX_DISTINCT_CONTACTS | integer 1..9007199254740991 | 25 | no | - |
 | PORT | integer 1..65535 | 3000 | no | - |
 | ALLOWED_ORIGINS | comma-separated non-empty values | (unset) | yes | - |
 | TRUSTED_PROXIES | comma-separated non-empty values | (unset) | no | - |
@@ -60,7 +101,7 @@ Legacy `RELEASE_MANIFEST_MAX_AGE_MS` must migrate to `CONTRACT_RELEASE_MAX_AGE_D
 | MIN_BATCH_SIZE_FLOOR | integer 1..9007199254740991 | 1 | no | - |
 | ADAPTIVE_FILL_THRESHOLD_BLOCKS | integer 1..9007199254740991 | 10000 | no | - |
 | CONTRACT_RELEASE_MANIFEST_PATH | non-empty string | (unset) | yes | - |
-| CONTRACT_RELEASE_ID | non-empty string | (unset) | yes | - |
+| CONTRACT_RELEASE_ID | non-empty string | (unset) | yes | RELEASE_ID |
 | CONTRACT_RELEASE_SHA256 | 64-character lowercase SHA-256 | (unset) | yes | - |
 | CONTRACT_RELEASE_DEPLOYMENT_BLOCK | integer 0..9007199254740991 | 0 | yes | - |
 | CONTRACT_RELEASE_MAX_AGE_DAYS | integer 1..365 | 90 | no | MANIFEST_MAX_AGE_DAYS |

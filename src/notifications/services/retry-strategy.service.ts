@@ -1,5 +1,9 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { EventType, PRIORITY_RETRY_CONFIG } from '../enums/event-type.enum';
+import {
+  DeliveryFailureKind,
+  narrowDeliveryError,
+} from '../delivery/delivery-error';
 
 export enum ErrorClassification {
   NETWORK = 'NETWORK',
@@ -111,71 +115,31 @@ export class RetryStrategy {
   }
 
   /**
-   * Classify error type
+   * Classify error type.
+   *
+   * Provider-specific fields (status codes, provider error codes) are read only
+   * inside `narrowDeliveryError`; this method consumes the narrowed domain error
+   * and maps it onto the retry strategy's classification.
    */
-  private classifyError(error: Error | any): ErrorClassification {
-    // Network-related errors
-    const networkPatterns = [
-      'ECONNREFUSED',
-      'ECONNRESET',
-      'ETIMEDOUT',
-      'EHOSTUNREACH',
-      'ENETUNREACH',
-      'ENOTFOUND',
-      'socket',
-      'timeout',
-    ];
+  private classifyError(error: unknown): ErrorClassification {
+    const narrowed = narrowDeliveryError(error);
 
-    const errorMsg = error?.message?.toLowerCase() || '';
-    const errorCode = error?.code?.toUpperCase() || '';
-    const errorStatus = error?.response?.status;
-
-    if (
-      networkPatterns.some(
-        (p) =>
-          errorMsg.includes(p.toLowerCase()) ||
-          errorCode.includes(p) ||
-          errorMsg.includes(p.toLowerCase()),
-      )
-    ) {
-      return ErrorClassification.NETWORK;
+    if (!narrowed.retryable) {
+      return ErrorClassification.FATAL;
     }
 
-    // Rate limit
-    if (errorStatus === 429 || errorMsg.includes('rate')) {
+    if (narrowed.providerStatusCode === 429) {
       return ErrorClassification.RATE_LIMIT;
     }
 
-    // Transient (5xx)
-    if (errorStatus && errorStatus >= 500 && errorStatus < 600) {
-      return ErrorClassification.TRANSIENT;
+    switch (narrowed.kind) {
+      case DeliveryFailureKind.TIMEOUT:
+        return ErrorClassification.NETWORK;
+      case DeliveryFailureKind.UNAVAILABLE:
+        return ErrorClassification.TRANSIENT;
+      default:
+        return ErrorClassification.TRANSIENT;
     }
-
-    // Client errors (4xx except 429)
-    if (errorStatus && errorStatus >= 400 && errorStatus < 500) {
-      return ErrorClassification.FATAL;
-    }
-
-    // Validation errors, malformed data
-    if (
-      errorMsg.includes('validation') ||
-      errorMsg.includes('invalid') ||
-      errorMsg.includes('required')
-    ) {
-      return ErrorClassification.FATAL;
-    }
-
-    // Unknown user, not found
-    if (
-      errorMsg.includes('not found') ||
-      errorMsg.includes('no user') ||
-      errorStatus === 404
-    ) {
-      return ErrorClassification.FATAL;
-    }
-
-    // Default to transient (safer to retry)
-    return ErrorClassification.TRANSIENT;
   }
 
   /**
@@ -249,7 +213,7 @@ export class RetryStrategy {
       EventType.VERIFICATION_ASSIGNED,
       EventType.DISPUTE_ESCALATED,
       EventType.REPUTATION_PENALTY,
-      EventType.MODERATOR_ACTION,
+      EventType.MODERATION_ACTION,
     ];
 
     if (urgentEvents.includes(eventType)) return 'URGENT';

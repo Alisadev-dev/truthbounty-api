@@ -132,8 +132,9 @@ describe('NotificationEventPublisher', () => {
 
       const result = await service.getEventStatus('outbox-123');
 
-      expect(result.status).toBe('DISPATCHED');
-      expect(result.retryCount).toBe(2);
+      expect(result).not.toBeNull();
+      expect(result!.status).toBe('DISPATCHED');
+      expect(result!.retryCount).toBe(2);
     });
 
     it('should return null if event not found', async () => {

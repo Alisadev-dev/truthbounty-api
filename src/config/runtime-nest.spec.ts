@@ -62,6 +62,34 @@ describe('Nest runtime configuration boundary', () => {
     });
   });
 
+  it('supplies new configuration loaders from the same frozen snapshot', async () => {
+    process.env = {
+      NODE_ENV: 'test',
+      PUBLIC_STATUS_RATE_LIMIT: '17',
+      ABUSE_SIGNALS_SCRAPE_MAX_READS: '42',
+      INDEXER_RELEASE_ID: 'release-v1',
+      INDEXER_DEPLOYMENT_BLOCK: '12',
+      INDEXER_ARTIFACT_CHECKSUM: 'a'.repeat(64),
+    };
+    await jest.isolateModulesAsync(async () => {
+      const { loadPublicStatusOptions } =
+        await import('../health/public-status/public-status.options');
+      const { loadAbusePolicyConfig } =
+        await import('../abuse-signals/abuse-signals.config');
+      const { loadFinalizedCursorConfig } =
+        await import('../indexer/finalized-cursor/finalized-cursor.config');
+      expect(loadPublicStatusOptions().rateLimit).toBe(17);
+      process.env.PUBLIC_STATUS_RATE_LIMIT = '99';
+      process.env.ABUSE_SIGNALS_SCRAPE_MAX_READS = '99';
+      process.env.INDEXER_RELEASE_ID = 'another-release';
+      expect(loadPublicStatusOptions().rateLimit).toBe(17);
+      expect(
+        loadAbusePolicyConfig().thresholds.scraping.maxAnonymousReads,
+      ).toBe(42);
+      expect(loadFinalizedCursorConfig().binding?.releaseId).toBe('release-v1');
+    });
+  });
+
   it('does not retain unrelated process credentials', async () => {
     process.env = { NODE_ENV: 'test', UNRELATED_SECRET: 'canary' };
     await jest.isolateModulesAsync(async () => {

@@ -8,7 +8,9 @@ import { NotificationOrchestrator } from './notification-orchestrator.service';
 import { DeliveryTracker } from './delivery-tracker.service';
 import { PreferenceEnforcer } from './preference-enforcer.service';
 import { EventType } from '../enums/event-type.enum';
-import * as crypto from 'crypto';
+import { DeliveryChannel } from '../interfaces/notification.types';
+import { parseDeliveryChannel } from '../delivery/delivery-channel';
+import { planDeliveryRetry } from '../delivery/delivery-retry.policy';
 
 export interface NotificationProcessorJob {
   outboxEventId: string;
@@ -100,11 +102,15 @@ export class NotificationProcessor {
             continue;
           }
 
-          // Check user preferences
+          // Check user preferences. The channel is resolved from the
+          // publisher payload and falls back to in-app; a null channel is
+          // never handed to the enforcer or the orchestrator.
+          const preferenceChannel =
+            parseDeliveryChannel(payload?.channel) ?? DeliveryChannel.IN_APP;
           const shouldNotify = await this.preferenceEnforcer.shouldDeliver(
             userId,
             eventType,
-            null, // Let orchestrator decide channel
+            preferenceChannel,
           );
 
           if (!shouldNotify.allowed) {
@@ -157,84 +163,48 @@ export class NotificationProcessor {
       throw error;
     }
 
-    const isNetworkError = this.isNetworkError(error);
-    const shouldRetry =
-      isNetworkError && outboxEvent.retryCount < (outboxEvent.maxRetries || 5);
+    // Classify the failure through the shared, deterministic retry policy.
+    // Provider-specific fields are read only inside `narrowDeliveryError`, and
+    // terminal kinds can never be resurrected by the retry budget.
+    const plan = planDeliveryRetry(error, outboxEvent.retryCount ?? 0, {
+      budget: { maxAttempts: outboxEvent.maxRetries || 5 },
+    });
 
-    if (shouldRetry) {
+    if (plan.action === 'retry') {
       this.logger.warn(
-        `Notification job retry ${outboxEvent.retryCount + 1}/${outboxEvent.maxRetries}`,
+        `Notification job retry ${plan.nextAttempt}/${outboxEvent.maxRetries || 5}: ${plan.reason}`,
       );
 
-      // Calculate backoff delay
-      const delay = this.calculateBackoffDelay(
-        outboxEvent.retryCount,
-        isNetworkError,
-      );
-
-      // Update outbox
-      outboxEvent.retryCount++;
-      outboxEvent.lastError = error.message;
+      outboxEvent.retryCount = plan.nextAttempt;
+      outboxEvent.lastError = plan.error.message;
       outboxEvent.status = 'PENDING'; // Re-queue
       await this.outboxRepository.save(outboxEvent);
 
       // Throw to signal BullMQ to retry with exponential backoff
-      throw new Error(
-        `Retry ${outboxEvent.retryCount}: ${error.message}`,
-      );
-    } else {
-      // Move to dead-letter
-      this.logger.error(
-        `Moving notification to dead-letter (maxRetries exceeded): ${outboxEventId}`,
-      );
-
-      outboxEvent.status = 'DEAD_LETTER';
-      outboxEvent.lastError = error.message;
-      outboxEvent.processedAt = new Date();
-      await this.outboxRepository.save(outboxEvent);
-
-      // Alert monitoring
-      this.logger.error(
-        `DEAD_LETTER: ${outboxEvent.eventType} - ${error.message}`,
-      );
-
-      return { success: false, deadLettered: true, reason: error.message };
+      throw new Error(`Retry ${outboxEvent.retryCount}: ${plan.error.message}`);
     }
-  }
 
-  /**
-   * Classify error as network or fatal
-   */
-  private isNetworkError(error: Error): boolean {
-    const networkErrors = [
-      'ECONNREFUSED',
-      'ECONNRESET',
-      'ETIMEDOUT',
-      'EHOSTUNREACH',
-      'ENETUNREACH',
-      'timeout',
-      'socket',
-      'ENOTFOUND',
-    ];
-
-    return networkErrors.some(
-      (err) =>
-        error.message.includes(err) ||
-        error.code === err ||
-        error.name === err,
+    // Move to dead-letter: terminal failures land here immediately, retryable
+    // failures only once the budget is exhausted.
+    this.logger.error(
+      `Moving notification to dead-letter (${plan.reason}): ${outboxEventId}`,
     );
-  }
 
-  /**
-   * Calculate exponential backoff delay in ms
-   */
-  private calculateBackoffDelay(retryCount: number, isNetworkError: boolean): number {
-    const baseDelay = isNetworkError ? 2000 : 1000; // ms
-    const multiplier = isNetworkError ? 2 : 1.5;
-    const maxDelay = 60000; // 1 minute
+    outboxEvent.status = 'DEAD_LETTER';
+    outboxEvent.lastError = plan.error.message;
+    outboxEvent.processedAt = new Date();
+    await this.outboxRepository.save(outboxEvent);
 
-    const delay = baseDelay * Math.pow(multiplier, retryCount);
-    return Math.min(delay, maxDelay);
+    // Alert monitoring
+    this.logger.error(
+      `DEAD_LETTER: ${outboxEvent.eventType} - ${plan.error.message}`,
+    );
+
+    return {
+      success: false,
+      deadLettered: true,
+      reason: plan.error.message,
+    };
   }
 
   /**

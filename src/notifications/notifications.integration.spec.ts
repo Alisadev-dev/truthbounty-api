@@ -297,7 +297,8 @@ describe('Notification System (Integration)', () => {
 
       // 3. Get event status
       const status = await eventPublisher.getEventStatus(published.id);
-      expect(status.status).toBe('PENDING');
+      expect(status).not.toBeNull();
+      expect(status!.status).toBe('PENDING');
 
       // 4. Get metrics
       const metrics = await eventPublisher.getMetrics();

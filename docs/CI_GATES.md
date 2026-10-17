@@ -12,7 +12,7 @@ and must update this table in the same pull request.
 
 | Job id (YAML key) | Display name | Workflow | Blocking? | What it proves |
 | --- | --- | --- | --- | --- |
-| `build-and-test` | Build, Lint, and Test | `ci.yml` | **Yes** | `npm ci` succeeds against the lockfile, `npm run build` produces no uncommitted artifact drift, ESLint is clean, and the Jest suite passes with coverage. |
+| `build-and-test` | Build, Lint, and Test | `ci.yml` | **Yes** | `npm ci` succeeds against the lockfile, prerequisites are generated, toolchain & compiler parity are validated, `npm run type-check` passes on the unified source set, `npm run build` produces no uncommitted artifact drift, ESLint is clean, and the Jest suite passes with coverage. See `docs/TYPECHECK_PARITY.md`. |
 | `node-toolchain` | Node/npm Toolchain | `ci.yml` | **Yes** | The runner's `node` and `npm` major versions match `engines`, the lockfile is `lockfileVersion: 3`, and `npm ci` did not modify `package.json` or `package-lock.json`. |
 | `schema-migration-gate` | Schema Migration and Drift Gate | `ci.yml` | **Yes** | All TypeORM migrations in `src/migrations/` apply to an empty PostgreSQL database, the latest one is reversible and re-appliable, and the entities do not drift from the migrated schema. |
 | `security-scans` | Security Scans | `ci.yml` | **Yes** | `npm audit --audit-level=high`, TruffleHog secret scanning, and CodeQL for JavaScript/TypeScript. Uploads the audit output as the `npm-audit-report` artifact. |

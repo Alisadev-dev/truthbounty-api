@@ -144,6 +144,74 @@ export const runtimeSchema = {
     'development',
   ),
   LOCAL_DEV_MODE: { ...boolean(false), aliases: ['STAB_LOCAL_MODE'] },
+  SIWE_ALLOWED_ORIGINS: list(),
+  CAPABILITY_TOKEN_SIGNING_KEY: secret(true),
+  ADMIN_AUDIT_RETENTION_DAYS: integer(365, 1, 3650),
+  SIWE_ALLOWED_DOMAINS: list(),
+  SIWE_EXPECTED_STATEMENT: text(),
+  SIWE_SUPPORTED_CHAIN_IDS: {
+    ...list(),
+    description: 'comma-separated Optimism chain IDs',
+    parse(value: string) {
+      const chains = list().parse(value);
+      if (chains.some((chain) => !['10', '11155420'].includes(chain))) {
+        throw new Error('unsupported chain');
+      }
+      return chains;
+    },
+  },
+  OPERATIONS_AUDIT_MAX: integer(10000),
+  INDEXER_MAX_FINALIZED_LAG_BLOCKS: integer(150, 0),
+  INDEXER_MAX_HEAD_AGE_SECONDS: integer(120, 0),
+  INDEXER_RELEASE_ID: text(),
+  INDEXER_DEPLOYMENT_BLOCK: {
+    parse: integer(0, 0).parse,
+    description: 'non-negative safe integer',
+  },
+  INDEXER_ARTIFACT_CHECKSUM: {
+    ...text(),
+    description: '64-character lowercase SHA-256',
+    parse(value: string) {
+      if (!/^[a-f0-9]{64}$/.test(value)) throw new Error('invalid checksum');
+      return value;
+    },
+  },
+  PUBLIC_STATUS_CACHE_TTL_SECONDS: integer(15),
+  PUBLIC_STATUS_STALE_AFTER_SECONDS: integer(120),
+  PUBLIC_STATUS_WEB_HEALTH_URL: url(),
+  PUBLIC_STATUS_WEB_PROBE_TIMEOUT_MS: integer(2000),
+  PUBLIC_STATUS_RATE_LIMIT: integer(60),
+  PUBLIC_STATUS_RATE_WINDOW_SECONDS: integer(60),
+  ABUSE_SIGNALS_ENABLED: boolean(true),
+  ABUSE_SIGNALS_ENFORCEMENT_ENABLED: boolean(false),
+  ABUSE_SIGNALS_SUBJECT_SALT: {
+    ...secret(),
+    description: 'secret of at least 32 characters',
+    parse(value: string) {
+      if (value.trim().length < 32) throw new Error('short salt');
+      return value.trim();
+    },
+  },
+  ABUSE_SIGNALS_WINDOW_SECONDS: integer(300),
+  ABUSE_SIGNALS_MAX_ACTION_SECONDS: integer(900),
+  ABUSE_SIGNALS_MAX_ACTIONS_PER_SUBJECT: integer(3),
+  ABUSE_SIGNALS_TRUSTED_PROXY_HOPS: integer(0, 0),
+  ABUSE_SIGNALS_SCRAPE_MAX_READS: integer(600),
+  ABUSE_SIGNALS_SCRAPE_MAX_ROUTES: integer(40),
+  ABUSE_SIGNALS_STUFFING_MAX_FAILURES: integer(20),
+  ABUSE_SIGNALS_STUFFING_MAX_DISTINCT_CREDENTIALS: integer(5),
+  ABUSE_SIGNALS_STUFFING_MAX_DISTINCT_SUBJECTS: integer(10),
+  ABUSE_SIGNALS_SPAM_MAX_WRITES: integer(30),
+  ABUSE_SIGNALS_SPAM_MAX_DUPLICATE_PAYLOADS: integer(10),
+  ABUSE_SIGNALS_WEBHOOK_MAX_ENDPOINT_WRITES: integer(15),
+  ABUSE_SIGNALS_WEBHOOK_MAX_SECRET_ROTATIONS: integer(5),
+  ABUSE_SIGNALS_WEBHOOK_MAX_DELIVERIES: integer(200),
+  ABUSE_SIGNALS_STREAM_MAX_CONNECTIONS: integer(25),
+  ABUSE_SIGNALS_STREAM_MAX_SUBSCRIBE_OPS: integer(60),
+  ABUSE_SIGNALS_STREAM_MAX_MESSAGES: integer(300),
+  ABUSE_SIGNALS_SUPPORT_MAX_REQUESTS: integer(30),
+  ABUSE_SIGNALS_SUPPORT_MAX_DUPLICATE_REQUESTS: integer(20),
+  ABUSE_SIGNALS_SUPPORT_MAX_DISTINCT_CONTACTS: integer(25),
   PORT: integer(3000, 1, 65535),
   ALLOWED_ORIGINS: { ...list(), productionRequired: true },
   TRUSTED_PROXIES: list(),
@@ -214,7 +282,10 @@ export const runtimeSchema = {
   MIN_BATCH_SIZE_FLOOR: integer(1),
   ADAPTIVE_FILL_THRESHOLD_BLOCKS: integer(10000),
   CONTRACT_RELEASE_MANIFEST_PATH: text({ productionRequired: true }),
-  CONTRACT_RELEASE_ID: text({ productionRequired: true }),
+  CONTRACT_RELEASE_ID: {
+    ...text({ productionRequired: true }),
+    aliases: ['RELEASE_ID'],
+  },
   CONTRACT_RELEASE_SHA256: {
     ...text({ productionRequired: true }),
     description: '64-character lowercase SHA-256',
@@ -420,6 +491,38 @@ export function parseRuntimeConfig(env: Environment): RuntimeConfig {
     }
   }
   const config = result as RuntimeConfig;
+  if (
+    config.SIWE_SUPPORTED_CHAIN_IDS &&
+    !config.SIWE_SUPPORTED_CHAIN_IDS.includes(String(config.CHAIN_ID))
+  ) {
+    errors.push('SIWE_SUPPORTED_CHAIN_IDS: must include the configured chain');
+  }
+  const bindingKeys = [
+    'INDEXER_RELEASE_ID',
+    'INDEXER_DEPLOYMENT_BLOCK',
+    'INDEXER_ARTIFACT_CHECKSUM',
+  ] as const;
+  if (bindingKeys.some((key) => config[key] !== undefined)) {
+    if (bindingKeys.some((key) => config[key] === undefined))
+      errors.push('INDEXER_RELEASE_ID: complete release binding required');
+    if (
+      config.INDEXER_RELEASE_ID &&
+      !/^[A-Za-z0-9._-]{1,64}$/.test(config.INDEXER_RELEASE_ID)
+    )
+      errors.push('INDEXER_RELEASE_ID: invalid release identifier');
+    if (
+      config.CONTRACT_RELEASE_ID &&
+      config.INDEXER_RELEASE_ID !== config.CONTRACT_RELEASE_ID
+    )
+      errors.push('INDEXER_RELEASE_ID: conflicts with canonical release');
+    if (
+      config.CONTRACT_RELEASE_ID &&
+      config.INDEXER_DEPLOYMENT_BLOCK !==
+        config.CONTRACT_RELEASE_DEPLOYMENT_BLOCK
+    )
+      errors.push('INDEXER_DEPLOYMENT_BLOCK: conflicts with canonical release');
+  }
+
   if (config.DATABASE_URL) {
     const componentKeys = [
       'DB_HOST',
@@ -581,6 +684,9 @@ export function compatibilityEnvironment(config: RuntimeConfig): Environment {
   values.RELEASE_MANIFEST_MAX_AGE_MS = String(
     (config.CONTRACT_RELEASE_MAX_AGE_DAYS ?? 90) * 86400000,
   );
+  values.SIWE_SUPPORTED_CHAIN_IDS ??= String(config.CHAIN_ID);
+  values.SIWE_ALLOWED_DOMAINS ??= config.SIWE_DOMAIN;
+  values.SIWE_ALLOWED_ORIGINS ??= config.ALLOWED_ORIGINS?.join(',');
   return Object.freeze(values);
 }
 

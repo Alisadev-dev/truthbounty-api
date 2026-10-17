@@ -1,15 +1,9 @@
 import { Module } from '@nestjs/common';
-import { AnalyticsController } from './analytics.controller';
+import { AnalyticsConsentService } from './analytics-consent.service';
 import { AnalyticsService } from './analytics.service';
-import { PrismaModule } from '../prisma/prisma.module';
-import { RedisModule } from '../redis/redis.module';
-import { AuthModule } from '../auth/auth.module';
-import { AuditModule } from '../audit/audit.module';
 
 @Module({
-  imports: [PrismaModule, RedisModule, AuthModule, AuditModule],
-  controllers: [AnalyticsController],
-  providers: [AnalyticsService],
-  exports: [AnalyticsService],
+  providers: [AnalyticsConsentService, AnalyticsService],
+  exports: [AnalyticsConsentService, AnalyticsService],
 })
 export class AnalyticsModule {}

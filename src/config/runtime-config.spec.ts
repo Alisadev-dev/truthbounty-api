@@ -32,6 +32,7 @@ const production = {
   REDIS_TLS: 'true',
   RPC_URL: 'https://rpc.internal/private-key',
   JWT_SECRET: 'a-distinct-long-secret-for-this-unit-test',
+  CAPABILITY_TOKEN_SIGNING_KEY: 'a-distinct-capability-key-for-this-unit-test',
   SIWE_DOMAIN: 'truthbounty.internal',
   ALLOWED_ORIGINS: 'https://app.internal',
   IPFS_PROVIDER: 'pinata',
@@ -48,6 +49,78 @@ const production = {
 };
 
 describe('runtime schema', () => {
+  it('uses canonical chain, domain and origins for omitted SIWE overrides', () => {
+    const environment = compatibilityEnvironment(
+      parseRuntimeConfig({
+        CHAIN_ID: '11155420',
+        SIWE_DOMAIN: 'app.internal',
+        ALLOWED_ORIGINS: 'https://app.internal',
+      }),
+    );
+    expect(environment.SIWE_SUPPORTED_CHAIN_IDS).toBe('11155420');
+    expect(environment.SIWE_ALLOWED_DOMAINS).toBe('app.internal');
+    expect(environment.SIWE_ALLOWED_ORIGINS).toBe('https://app.internal');
+    expect(() =>
+      parseRuntimeConfig({
+        CHAIN_ID: '11155420',
+        SIWE_SUPPORTED_CHAIN_IDS: '10',
+      }),
+    ).toThrow('configured chain');
+    expect(() =>
+      parseRuntimeConfig({ SIWE_SUPPORTED_CHAIN_IDS: 'NaN' }),
+    ).toThrow('SIWE_SUPPORTED_CHAIN_IDS');
+  });
+  it('keeps finalized-cursor artifact checksums distinct from manifest checksums', () => {
+    const config = parseRuntimeConfig({
+      ...pinned,
+      INDEXER_RELEASE_ID: 'op-test-v1',
+      INDEXER_DEPLOYMENT_BLOCK: '12',
+      INDEXER_ARTIFACT_CHECKSUM: 'a'.repeat(64),
+    });
+    expect(config.INDEXER_ARTIFACT_CHECKSUM).toBe('a'.repeat(64));
+    expect(config.CONTRACT_RELEASE_SHA256).toBe(pinned.CONTRACT_RELEASE_SHA256);
+    expect(compatibilityEnvironment(config).RELEASE_ID).toBe('op-test-v1');
+  });
+
+  it.each([
+    { INDEXER_RELEASE_ID: 'other-release' },
+    { INDEXER_DEPLOYMENT_BLOCK: '13' },
+    { INDEXER_ARTIFACT_CHECKSUM: undefined },
+  ])(
+    'rejects incomplete or conflicting finalized-cursor binding %j',
+    (override) => {
+      expect(() =>
+        parseRuntimeConfig({
+          ...pinned,
+          INDEXER_RELEASE_ID: 'op-test-v1',
+          INDEXER_DEPLOYMENT_BLOCK: '12',
+          INDEXER_ARTIFACT_CHECKSUM: 'a'.repeat(64),
+          ...override,
+        }),
+      ).toThrow(/INDEXER_/);
+    },
+  );
+
+  it.each([
+    ['PUBLIC_STATUS_RATE_LIMIT', '0'],
+    ['OPERATIONS_AUDIT_MAX', 'NaN'],
+    ['ABUSE_SIGNALS_ENABLED', 'yes'],
+    ['ABUSE_SIGNALS_WINDOW_SECONDS', '1.5'],
+    ['ABUSE_SIGNALS_TRUSTED_PROXY_HOPS', '-1'],
+    ['ABUSE_SIGNALS_SUBJECT_SALT', 'private-short-secret'],
+  ])(
+    'validates newly integrated setting %s without disclosing its value',
+    (key, value) => {
+      expect(() => parseRuntimeConfig({ [key]: value })).toThrow(key);
+      try {
+        parseRuntimeConfig({ [key]: value });
+      } catch (error) {
+        if (value === 'private-short-secret')
+          expect(String(error)).not.toContain(value);
+      }
+    },
+  );
+
   it('derives legacy database components from the one canonical URL', () => {
     const config = parseRuntimeConfig({
       DATABASE_URL:

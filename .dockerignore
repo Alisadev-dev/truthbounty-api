@@ -48,7 +48,9 @@ dev.db
 prisma/*.db
 
 # --- Tests, fixtures & scratch output -------------------------------------
-test
+# `test` is deliberately NOT ignored here so builder stage type-checking
+# compiles the identical source set as local and CI. The runner stage only copies
+# runtime artifacts (dist, node_modules, src/generated).
 coverage-reports
 *.log
 npm-debug.log*

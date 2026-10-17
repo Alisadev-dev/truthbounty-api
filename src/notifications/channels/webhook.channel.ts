@@ -3,6 +3,8 @@ import { HttpService } from '@nestjs/axios';
 import { ConfigService } from '@nestjs/config';
 import { NotificationChannel, ChannelDeliveryResult, RenderedNotificationPayload } from './channel.interface';
 import { PreferenceEnforcer } from '../services/preference-enforcer.service';
+import { DeliveryChannel } from '../interfaces/notification.types';
+import { narrowDeliveryError } from '../delivery/delivery-error';
 import { firstValueFrom } from 'rxjs';
 import { timeout } from 'rxjs/operators';
 import * as crypto from 'crypto';
@@ -126,19 +128,19 @@ export class WebhookChannel implements NotificationChannel {
         channelMessageId: `webhook-${Date.now()}`,
       };
     } catch (error) {
-      const isNetworkError =
-        error.code === 'ECONNREFUSED' ||
-        error.code === 'ETIMEDOUT' ||
-        error.code === 'EHOSTUNREACH' ||
-        error.response?.status >= 500;
+      // Narrow before reading any provider-specific field. Never log the
+      // webhook URL or body, which may contain secrets.
+      const narrowed = narrowDeliveryError(error, {
+        channel: DeliveryChannel.WEBHOOK,
+      });
 
       this.logger.warn(
-        `Failed to send webhook to ${payload.userId}: ${error.message} (network: ${isNetworkError})`,
+        `Failed to send webhook notification: ${narrowed.message} (retryable: ${narrowed.retryable})`,
       );
 
       return {
         success: false,
-        error: error.message,
+        error: narrowed.message,
       };
     }
   }

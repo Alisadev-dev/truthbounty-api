@@ -1,0 +1,327 @@
+{
+  "openapi": "3.0.0",
+  "paths": {
+    "/status/public": {
+      "get": {
+        "description": "Freshness-labelled, allow-listed status for the public status page. Missing data is reported as `unknown` and old data as `stale`; neither is ever reported as `operational`.",
+        "operationId": "PublicStatusController_getPublicStatus",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#components/schemas/PublicStatusResponseDto"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Per-client rate limit exceeded."
+          }
+        },
+        "summary": "Public service status",
+        "tags": [
+          "Public Status"
+        ]
+      }
+    }
+  },
+  "info": {
+    "title": "TruthBounty Public Status",
+    "description": "Sanitized public service-status projection (UXBE-001).",
+    "version": "public-status.v1",
+    "contact": {}
+  },
+  "tags": [],
+  "servers": [],
+  "components": {
+    "schemas": {
+      "PublicObservationDto": {
+        "type": "object",
+        "properties": {
+          "source": {
+            "type": "string",
+            "enum": [
+              "api_self",
+              "dependency_probe",
+              "web_probe",
+              "finalized_cursor",
+              "release_config",
+              "not_observed"
+            ]
+          },
+          "observedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "description": "When the underlying data was observed; null if never."
+          },
+          "ageSeconds": {
+            "type": "number",
+            "nullable": true,
+            "minimum": 0
+          },
+          "freshness": {
+            "type": "string",
+            "enum": [
+              "fresh",
+              "stale",
+              "unknown"
+            ]
+          }
+        },
+        "required": [
+          "source",
+          "observedAt",
+          "ageSeconds",
+          "freshness"
+        ]
+      },
+      "PublicComponentStatusEnum": {
+        "type": "string",
+        "enum": [
+          "operational",
+          "degraded",
+          "delayed",
+          "stale",
+          "unavailable",
+          "unknown"
+        ]
+      },
+      "PublicComponentStatusDto": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "enum": [
+              "web",
+              "api",
+              "rpc",
+              "indexer",
+              "database",
+              "evidence_gateway"
+            ]
+          },
+          "state": {
+            "$ref": "#/components/schemas/PublicComponentStatusEnum"
+          },
+          "observation": {
+            "$ref": "#/components/schemas/PublicObservationDto"
+          }
+        },
+        "required": [
+          "id",
+          "state",
+          "observation"
+        ]
+      },
+      "PublicDependencyProvenanceDto": {
+        "type": "object",
+        "properties": {
+          "dependency": {
+            "type": "string",
+            "enum": [
+              "rpc",
+              "indexer",
+              "database",
+              "evidence_gateway",
+              "release_config"
+            ]
+          },
+          "required": {
+            "type": "boolean",
+            "description": "Whether this dependency is required for readiness. A failed required dependency removes readiness."
+          },
+          "chainId": {
+            "type": "number",
+            "nullable": true
+          },
+          "releaseId": {
+            "type": "string",
+            "nullable": true
+          },
+          "deploymentBlock": {
+            "type": "number",
+            "nullable": true
+          },
+          "artifactChecksum": {
+            "type": "string",
+            "nullable": true,
+            "description": "SHA-256 of the published release artifact bound to this dependency observation."
+          },
+          "lastSuccessAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "description": "Last successful observation of this dependency; null if never."
+          },
+          "lastSuccessAgeSeconds": {
+            "type": "number",
+            "nullable": true,
+            "minimum": 0
+          },
+          "state": {
+            "$ref": "#/components/schemas/PublicComponentStatusEnum"
+          },
+          "observation": {
+            "$ref": "#/components/schemas/PublicObservationDto"
+          }
+        },
+        "required": [
+          "dependency",
+          "required",
+          "chainId",
+          "releaseId",
+          "deploymentBlock",
+          "artifactChecksum",
+          "lastSuccessAt",
+          "lastSuccessAgeSeconds",
+          "state",
+          "observation"
+        ]
+      },
+      "PublicReleaseManifestDto": {
+        "type": "object",
+        "properties": {
+          "releaseId": {
+            "type": "string",
+            "nullable": true
+          },
+          "chainId": {
+            "type": "number",
+            "nullable": true
+          },
+          "deploymentBlock": {
+            "type": "number",
+            "nullable": true
+          },
+          "artifactChecksum": {
+            "type": "string",
+            "nullable": true,
+            "description": "SHA-256 of the published release artifact."
+          },
+          "state": {
+            "$ref": "#components/schemas/PublicComponentStatusEnum"
+          },
+          "observation": {
+            "$ref": "#components/schemas/PublicObservationDto"
+          }
+        },
+        "required": [
+          "releaseId",
+          "chainId",
+          "deploymentBlock",
+          "artifactChecksum",
+          "state",
+          "observation"
+        ]
+      },
+      "PublicChainProgressDto": {
+        "type": "object",
+        "properties": {
+          "finalizedBlock": {
+            "type": "number",
+            "nullable": true
+          },
+          "indexedBlock": {
+            "type": "number",
+            "nullable": true
+          },
+          "lagBlocks": {
+            "type": "number",
+            "nullable": true,
+            "description": "finalizedBlock - indexedBlock."
+          },
+          "state": {
+            "$ref": "#components/schemas/PublicComponentStatusEnum"
+          },
+          "observation": {
+            "$ref": "#components/schemas/PublicObservationDto"
+          }
+        },
+        "required": [
+          "finalizedBlock",
+          "indexedBlock",
+          "lagBlocks",
+          "state",
+          "observation"
+        ]
+      },
+      "PublicStatusCacheDto": {
+        "type": "object",
+        "properties": {
+          "maxAgeSeconds": {
+            "type": "number",
+            "minimum": 0
+          },
+          "staleAfterSeconds": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Observations older than this are reported as stale."
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "maxAgeSeconds",
+          "staleAfterSeconds",
+          "expiresAt"
+        ]
+      },
+      "PublicStatusResponseDto": {
+        "type": "object",
+        "properties": {
+          "schemaVersion": {
+            "type": "string",
+            "enum": [
+              "public-status.v1"
+            ]
+          },
+          "generatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "overall": {
+            "$ref": "#/components/schemas/PublicComponentStatusEnum",
+            "description": "Worst state across components, dependencies, release and chain progress."
+          },
+          "components": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PublicComponentStatusDto"
+            }
+          },
+          "dependencies": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PublicDependencyProvenanceDto"
+            }
+          },
+          "release": {
+            "$ref": "#/components/schemas/PublicReleaseManifestDto"
+          },
+          "chain": {
+            "$ref": "#/components/schemas/PublicChainProgressDto"
+          },
+          "cache": {
+            "$ref": "#components/schemas/PublicStatusCacheDto"
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "generatedAt",
+          "overall",
+          "components",
+          "dependencies",
+          "release",
+          "chain",
+          "cache"
+        ]
+      }
+    }
+  }
+}

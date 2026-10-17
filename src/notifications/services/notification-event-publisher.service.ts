@@ -109,7 +109,11 @@ export class NotificationEventPublisher {
     events: PublishEventDto[],
     manager?: EntityManager,
   ): Promise<Array<{ id: string; status: string; idempotencyKey: string }>> {
-    const results = [];
+    const results: Array<{
+      id: string;
+      status: string;
+      idempotencyKey: string;
+    }> = [];
 
     for (const event of events) {
       const result = await this.publishEvent(event, manager);
@@ -142,15 +146,13 @@ export class NotificationEventPublisher {
    * Query outbox status for an event
    * Used for polling delivery status
    */
-  async getEventStatus(
-    outboxEventId: string,
-  ): Promise<{
+  async getEventStatus(outboxEventId: string): Promise<{
     id: string;
     status: string;
     retryCount: number;
     processedAt?: Date;
     lastError?: string;
-  }> {
+  } | null> {
     const event = await this.outboxRepository.findOne({
       where: { id: outboxEventId },
     });

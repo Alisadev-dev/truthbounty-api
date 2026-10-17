@@ -49,7 +49,7 @@ describe('runtime configuration drift', () => {
         if (entry.name !== 'runtime-config.ts' && /process\.env\b/.test(text))
           failures.push(`${entry.name}: direct process.env read`);
         const matches = text.matchAll(
-          /(?:getRuntimeEnvironment\(\)\.([A-Z][A-Z0-9_]+)|\.get(?:<[^>]+>)?\(\s*['"]([A-Z][A-Z0-9_]+)['"])/g,
+          /(?:(?:getRuntimeEnvironment\(\)|env)\.([A-Z][A-Z0-9_]+)|(?:\.get(?:<[^>]+>)?|read(?:PositiveInt|NonNegativeInt|Boolean))\(\s*(?:env,\s*)?['"]([A-Z][A-Z0-9_]+)['"])/g,
         );
         for (const match of matches)
           if (!known.has(match[1] ?? match[2]))

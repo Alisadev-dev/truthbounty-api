@@ -54,8 +54,14 @@ export class WebSocketChannel implements NotificationChannel {
       // Emit to user's socket room
       const room = `user:${payload.userId}`;
 
+      // `metadata` is untrusted: only accept a string notification id.
+      const notificationId =
+        typeof payload.metadata.notificationId === 'string'
+          ? payload.metadata.notificationId
+          : `ws-${Date.now()}`;
+
       const notification = {
-        id: payload.metadata.notificationId || `ws-${Date.now()}`,
+        id: notificationId,
         eventType: payload.eventType,
         timestamp: new Date().toISOString(),
         title: payload.rendered.subject || payload.rendered.title,

@@ -1,5 +1,5 @@
 import { getRuntimeEnvironment } from '../config/runtime-config';
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { DataSource } from 'typeorm';
@@ -10,6 +10,7 @@ import { JobsService } from '../jobs/jobs.service';
 import { BlockchainStateService } from '../blockchain/state.service';
 import { MetricsService } from '../metrics/metrics.service';
 import { DatabaseReadinessService } from '../database/database-readiness.service';
+import { FinalizedCursorService } from '../indexer/finalized-cursor/finalized-cursor.service';
 import { classifyFailure, withTimeout } from './utils/bounded-probe.util';
 import {
   DependencyHealthResult,
@@ -62,6 +63,8 @@ export class HealthService {
     private readonly ipfsService: IpfsService,
     private readonly blockchainStateService: BlockchainStateService,
     private readonly metricsService: MetricsService,
+    @Optional()
+    private readonly finalizedCursorService?: FinalizedCursorService,
   ) {
     this.appVersion = getRuntimeEnvironment().npm_package_version ?? '0.0.1';
   }
@@ -230,6 +233,16 @@ export class HealthService {
       },
     ];
 
+    // PREWAVE-BE-001: only enforced once a release binding is configured.
+    if (this.finalizedCursorService?.isConfigured()) {
+      configs.push({
+        name: 'finalized_cursor',
+        critical: true,
+        timeoutMs: 2000,
+        check: () => this.checkFinalizedCursor(),
+      });
+    }
+
     return Promise.all(
       configs.map(async (config) => {
         const start = Date.now();
@@ -324,6 +337,16 @@ export class HealthService {
     }
     if (health.status === 'degraded') {
       throw new Error('Indexer health is degraded beyond alert thresholds');
+    }
+  }
+
+  private async checkFinalizedCursor(): Promise<void> {
+    const status = await this.finalizedCursorService!.getConfiguredStatus();
+    if (!status || !status.ready) {
+      // Reason codes only: no chain URLs, hashes or protected detail.
+      throw new Error(
+        `Finalized cursor not ready: ${(status?.reasons ?? ['CURSOR_MISSING']).join(',')}`,
+      );
     }
   }
 

@@ -10,6 +10,10 @@ import {
   NotificationChannel as ChannelType,
 } from '../entities/notification.entity';
 import { NotificationChannel } from '../channels/channel.interface';
+import { DeliveryChannel } from '../interfaces/notification.types';
+import { parseDeliveryChannel } from '../delivery/delivery-channel';
+import { UnknownDeliveryChannelError } from '../delivery/delivery-error';
+import { toRenderedNotificationPayload } from '../delivery/rendered-notification-payload';
 
 interface NotificationJobData {
   notificationId: string;
@@ -21,8 +25,8 @@ interface NotificationJobData {
 export class NotificationProcessor extends WorkerHost {
   private readonly logger = new Logger(NotificationProcessor.name);
 
-  // Map of channel types to their implementations
-  private readonly channelMap: Map<string, NotificationChannel> = new Map();
+  // Canonical channel → provider. Untrusted values are never used as keys.
+  private readonly channelMap: Map<DeliveryChannel, NotificationChannel> = new Map();
 
   constructor(
     @InjectRepository(Notification)
@@ -33,9 +37,12 @@ export class NotificationProcessor extends WorkerHost {
     private readonly channels: NotificationChannel[],
   ) {
     super();
-    // Build the channel map for quick lookup
+    // Build the channel map keyed by the canonical channel identifier.
     this.channels.forEach((channel) => {
-      this.channelMap.set(channel.channelType, channel);
+      const canonical = parseDeliveryChannel(channel.channelType);
+      if (canonical) {
+        this.channelMap.set(canonical, channel);
+      }
     });
   }
 
@@ -54,11 +61,21 @@ export class NotificationProcessor extends WorkerHost {
       `Processing delivery job for notification ${notificationId} via ${channelType}, attempt ${retryCount + 1}`,
     );
 
-    // Get the channel implementation
-    const channel = this.channelMap.get(channelType);
+    // Canonicalize the channel before it can reach a provider. Null/unknown
+    // channels fail closed here instead of being coerced downstream.
+    const canonicalChannel = parseDeliveryChannel(channelType);
+    if (canonicalChannel === null) {
+      throw new UnknownDeliveryChannelError(
+        `Unknown or missing delivery channel: ${String(channelType)}`,
+      );
+    }
+
+    const channel = this.channelMap.get(canonicalChannel);
     if (!channel) {
       this.logger.error(`Unknown channel type: ${channelType}`);
-      throw new Error(`Unknown channel: ${channelType}`);
+      throw new UnknownDeliveryChannelError(
+        `No provider registered for channel: ${canonicalChannel}`,
+      );
     }
 
     // Get the notification
@@ -107,8 +124,12 @@ export class NotificationProcessor extends WorkerHost {
         return;
       }
 
-      // Send the notification
-      const result = await channel.send(notification);
+      // Send the notification through the single canonical payload type.
+      const payload = toRenderedNotificationPayload(
+        notification,
+        canonicalChannel,
+      );
+      const result = await channel.send(payload);
 
       if (result.success) {
         this.logger.debug(

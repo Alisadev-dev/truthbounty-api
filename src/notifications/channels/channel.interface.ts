@@ -1,20 +1,11 @@
-import { EventType } from '../enums/event-type.enum';
-import { DeliveryChannel } from '../interfaces/notification.types';
+import type { RenderedNotificationPayload } from '../delivery/rendered-notification-payload';
 
-export interface RenderedNotificationPayload {
-  userId: string;
-  channel: DeliveryChannel;
-  rendered: {
-    title?: string;
-    subject?: string;
-    body: string;
-    html?: string;
-    markdown?: string;
-    actionUrl?: string;
-  };
-  eventType: EventType;
-  metadata: Record<string, any>;
-}
+/**
+ * The canonical rendered payload lives in `../delivery/rendered-notification-payload`
+ * and is re-exported here so channel implementations keep a single, stable
+ * import path. Do not redeclare it locally.
+ */
+export type { RenderedNotificationPayload };
 
 export interface ChannelDeliveryResult {
   success: boolean;
@@ -25,7 +16,7 @@ export interface ChannelDeliveryResult {
 
 /**
  * NotificationChannel
- * 
+ *
  * Base interface for all notification delivery channels.
  * Implementations handle the specifics of their delivery mechanism
  * (email, push, webhook, etc.) while conforming to this contract.

@@ -13,7 +13,11 @@ RUN npm ci
 
 # Copy project sources and generate Prisma client
 COPY . .
-RUN npx prisma generate
+RUN npm run generate:prerequisites
+
+# Enforce local, CI, and container type-check parity (#625).
+# The container cannot bypass type checking.
+RUN npm run type-check
 
 # Build app
 RUN npm run build
