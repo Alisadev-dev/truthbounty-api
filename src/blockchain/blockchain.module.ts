@@ -1,7 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { BlockchainIndexerService } from './blockchain-indexer.service';
-import { ProcessedEvent, TokenBalance, IndexerCheckpoint } from './entities';
+import { ProcessedEvent, TokenBalance, IndexerCheckpoint, DeadLetterReplayRecord } from './entities';
 import { BlockchainStateService } from './state.service';
 import { ReorgDetectorService } from './reorg-detector.service';
 import { ReconciliationService } from './reconciliation.service';
@@ -13,11 +13,15 @@ import { StartupValidationService } from './startup-validation.service';
 import { DeterministicRpcFailoverService } from './deterministic-rpc-failover.service';
 import { ReadinessService } from './readiness.service';
 import { DependencyProvenanceService } from './dependency-provenance.service';
+import { DeadLetterReplayService } from './dead-letter-replay.service';
+import { DeadLetterReplayController } from './dead-letter-replay.controller';
+import { AuditModule } from '../audit/audit.module';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([ProcessedEvent, TokenBalance, IndexerCheckpoint]),
+    TypeOrmModule.forFeature([ProcessedEvent, TokenBalance, IndexerCheckpoint, DeadLetterReplayRecord]),
     SybilResistanceModule,
+    AuditModule,
   ],
   providers: [
     BlockchainIndexerService,
@@ -29,8 +33,9 @@ import { DependencyProvenanceService } from './dependency-provenance.service';
     EventIndexingService,
     StartupValidationService,
     DeterministicRpcFailoverService,
+    DeadLetterReplayService,
   ],
-  controllers: [BlockchainController],
+  controllers: [BlockchainController, DeadLetterReplayController],
   exports: [
     BlockchainIndexerService,
     BlockchainStateService,
@@ -40,6 +45,7 @@ import { DependencyProvenanceService } from './dependency-provenance.service';
     ReconciliationService,
     EventIndexingService,
     DeterministicRpcFailoverService,
+    DeadLetterReplayService,
   ],
 })
 export class BlockchainModule {}

@@ -444,3 +444,48 @@ model QuarantineAuditLog {
   @@index([targetType, targetId])
   @@index([actorId, createdAt])
 }
+
+// ----------------------------------------------------------------------------
+// PREWAVE-BE-049: Dead-letter replay authorization & idempotency.
+// Replay is denied by default; each authorized replay is bound to the
+// original payload hash, release/schema identity, and an immutable audit
+// record. A unique (originalEventId, payloadHash) guard prevents duplicate
+// effects for the same message.
+// ----------------------------------------------------------------------------
+
+model DeadLetterReplay {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Original dead-lettered outbox event being replayed.
+  originalEventId String
+  // Immutable hash of the original payload at replay authorization time.
+  originalPayloadHash String
+  // Release/schema identity the replay is bound to (fail closed on mismatch).
+  releaseId       String
+  schemaVersion   String
+  chainId         Int?
+  deploymentBlock String?
+  artifactChecksum String?
+
+  // Operator-provided reason (required, audited).
+  reason String
+
+  // authorized | running | completed | failed | stopped
+  status String @default("authorized")
+
+  // Bounded batch tracking so operators can stop/resume.
+  batchId    String?
+  batchLimit Int    @default(0)
+  processed  Int    @default(0)
+
+  // Immutable link back to the original event reference.
+  originalRef String
+  replayRef   String
+
+  @@unique([originalEventId, originalPayloadHash])
+  @@index([status, createdAt])
+  @@index([batchId])
+  @@index([releaseId, schemaVersion])
+}

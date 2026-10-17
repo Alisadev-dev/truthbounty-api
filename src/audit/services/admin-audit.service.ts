@@ -30,9 +30,49 @@ export interface AdminAuditQueryResult {
   totalPages: number;
 }
 
+/** Replay request contract. Denied by default unless fully authorized. */
+export interface DeadLetterReplayRequest {
+  /** Capability the caller must hold (e.g. 'deadletter.replay'). */
+  capability: string;
+  /** Operator identity and authority proof. */
+  actorId: string;
+  authorityReference: string;
+  correlationId: string;
+  /** Human reason; required and audited. */
+  reason: string;
+  /** Original dead-letter message reference. */
+  originalMessageId: string;
+  /** SHA-256 hash of the original payload for immutable linkage. */
+  originalPayloadHash: string;
+  /** Release/chain context the replay is bound to. */
+  chainId: number;
+  releaseId: string;
+  deploymentBlock: string;
+  artifactChecksum: string;
+  /** Max number of messages to replay in this batch. */
+  maxBatch: number;
+  /** Dry run must be explicitly set; defaults to true (no side effects). */
+  dryRun?: boolean;
+  /** Operator control: stop requested. */
+  stop?: boolean;
+}
+
+export interface DeadLetterReplayResult {
+  auditEventId: string;
+  replayReference: string;
+  dryRun: boolean;
+  processed: number;
+  skipped: number;
+  failed: number;
+  stopped: boolean;
+  outcome: AdminAuditOutcome;
+}
+
 const UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const CODE = /^[a-z][a-z0-9_.:-]{0,95}$/i;
+const HEX_SHA256 = /^0x[0-9a-f]{64}$/i;
+const BLOCK = /^(0|[1-9][0-9]{0,19})$/;
 const OUTCOMES: AdminAuditOutcome[] = [
   'attempted',
   'success',
@@ -41,6 +81,8 @@ const OUTCOMES: AdminAuditOutcome[] = [
   'rolled_back',
   'unknown',
 ];
+const MAX_BATCH_LIMIT = 100;
+const DEFAULT_BATCH_LIMIT = 10;
 
 /** Database-only operations must use the supplied manager; external effects need an outbox. */
 @Injectable()
@@ -117,6 +159,171 @@ export class AdminAuditService {
     } finally {
       await runner.release();
     }
+  }
+
+  /**
+   * Authorized and idempotent dead-letter replay.
+   *
+   * - Denied by default: must hold capability, provide reason, bounds,
+   *   dry run flag, original payload hash, and chain context.
+   * - Fails closed on stale/incompatible release or schema.
+   * - Prevents duplicate effects via an idempotency key derived from the
+   *   original message id + payload hash + release context.
+   * - Operators can stop/resume bounded batches via `stop` and `continuation`.
+   */
+  async replayDeadLetter(
+    request: DeadLetterReplayRequest,
+    work: (manager: EntityManager, item: DeadLetterReplayItem) => Promise<void>,
+    items: DeadLetterReplayItem[],
+  ): Promise<DeadLetterReplayResult> {
+    this.assertPostgres();
+    const safe = this.sanitizeReplayRequest(request);
+    const dryRun = safe.dryRun !== false;
+    const maxBatch = safe.maxBatch;
+    if (!Array.isArray(items)) throw new Error('Replay items must be an array');
+    if (items.length > maxBatch)
+      throw new Error('Replay batch exceeds configured limit');
+
+    // Resolve the authority and release context before any side effect.
+    const authority = await this.resolveReplayAuthority(safe);
+    if (!authority.authorized) throw new Error('Replay denied by default');
+    if (!authority.releaseCompatible)
+      throw new Error('Replay rejected: stale or incompatible release');
+
+    const replayReference = randomUUID();
+    const correlationId = safe.correlationId;
+    const auditContext: Omit<AdminAuditLogInput, 'outcome'> = {
+      actorId: safe.actorId,
+      actorType: 'user',
+      action: AdminActionType.REPLAY_DEAD_LETTER,
+      actionCategory: AdminActionCategory.OPERATIONS,
+      targetType: 'dead_letter',
+      targetId: safe.originalMessageId,
+      capability: safe.capability,
+      authoritySource: 'rbac',
+      authorityReference: safe.authorityReference,
+      requestReference: replayReference,
+      resultReference: undefined,
+      correlationId,
+      outcome: 'attempted',
+      severity: AdminAuditSeverity.HIGH,
+      chainContext: items === undefined ? undefined : {
+        chainId: safe.chainId,
+        releaseId: safe.releaseId,
+        deploymentBlock: safe.deploymentBlock,
+        artifactChecksum: safe.artifactChecksum,
+      },
+    };
+
+    // Dry run: record the attempt and return without invoking work.
+    if (dryRun) {
+      const auditEventId = await this.log({ ...auditContext, outcome: 'success' });
+      return {
+        auditEventId: auditEventId,
+        replayReference,
+        dryRun: true,
+        processed: 0,
+        skipped: items.length,
+        failed: 0,
+        stopped: false,
+        outcome: 'success',
+      };
+    }
+
+    // Idempotency key binds original message + payload hash + release context.
+    const idempotencyKey = this.deriveIdempotencyKey(safe);
+    const attemptId = await this.log(auditContext);
+
+    let processed = 0;
+    let skipped = 0;
+    let failed = 0;
+    let stopped = false;
+    let outcome: AdminAuditOutcome = 'success';
+
+    const runner = this.source.createQueryRunner();
+    try {
+      await runner.connect();
+      await runner.startTransaction();
+
+      // Reserve the idempotency key inside the transaction; conflicting replays
+      // are skipped (no duplicate effects).
+      const reserved = await this.reserveIdempotencyKey(runner.manager, idempotencyKey, attemptId);
+      if (!reserved) {
+        await runner.rollbackTransaction();
+        const auditEventId = await this.log({
+          ...auditContext,
+          outcome: 'failure',
+        });
+        return {
+          auditEventId: auditEventId,
+          replayReference,
+          dryRun: false,
+          processed: 0,
+          skipped: items.length,
+          failed: 0,
+          stopped: false,
+          outcome: 'failure',
+        };
+      }
+
+      for (const item of items) {
+        if (safe.stop) {
+          stopped = true;
+          break;
+        }
+        try {
+          await work(runner.manager, item);
+          processed++;
+        } catch {
+          failed++;
+          // Poison message: abort the batch and roll back to preserve atomicity.
+          outcome = 'partial';
+          throw new Error('Replay batch aborted on poison message');
+        }
+      }
+
+      await this.recordReplayLinkage(runner.manager, {
+        idempotencyKey,
+        originalMessageId: safe.originalMessageId,
+        originalPayloadHash: safe.originalPayloadHash,
+        replayReference,
+        attemptId,
+        chainId: safe.chainId,
+        releaseId: safe.releaseId,
+        deploymentBlock: safe.deploymentBlock,
+        artifactChecksum: safe.artifactChecksum,
+        processed,
+        skipped,
+        failed,
+        stopped,
+      });
+
+      await runner.commitTransaction();
+    } catch (error) {
+      if (runner.isTransactionActive) {
+        try {
+          await runner.rollbackTransaction();
+        } catch {
+          // Keep the durable attempt; never report success.
+        }
+      }
+      await this.log({ ...auditContext, outcome: outcome === 'partial' ? 'partial' : 'failure' });
+      throw error;
+    } finally {
+      await runner.release();
+    }
+
+    const auditEventId = await this.log({ ...auditContext, outcome });
+    return {
+      auditEventId,
+      replayReference,
+      dryRun: false,
+      processed,
+      skipped,
+      failed,
+      stopped,
+      outcome,
+    };
   }
 
   async query(filters: AdminAuditQueryFilters): Promise<AdminAuditQueryResult> {
@@ -220,6 +427,152 @@ export class AdminAuditService {
         errors: valid ? [] : ['Audit chain tip mismatch'],
       };
     });
+  }
+
+  /** Resolve capability and release compatibility. Default denial. */
+  private async resolveReplayAuthority(
+    request: DeadLetterReplayRequest,
+  ): Promise<{ authorized: boolean; releaseCompatible: boolean }> {
+    // Denied by default unless the capability is explicitly enabled.
+    const enabled = this.config.get<string>('DEADLETTER_REPLAY_ENABLED');
+    if (enabled !== 'true') return { authorized: false, releaseCompatible: false };
+    const allowed = this.config.get<string>('DEADLETTER_REPLAY_CAPABILITY');
+    if (!allowed || allowed !== request.capability)
+      return { authorized: false, releaseCompatible: false };
+    const currentReleaseId = this.config.get<string>('RELEASE_ID');
+    const currentChainId = Number(this.config.get<string>('CHAIN_ID'));
+    const currentChecksum = this.config.get<string>('ARTIFACT_CHECKSUM');
+    const releaseCompatible =
+      currentReleaseId === request.releaseId &&
+      currentChainId === request.chainId &&
+      currentChecksum === request.artifactChecksum;
+    return { authorized: true, releaseCompatible };
+  }
+
+  private deriveIdempotencyKey(request: DeadLetterReplayRequest): string {
+    return createHash('sha256')
+      .update(
+        [
+          request.originalMessageId,
+          request.originalPayloadHash,
+          request.chainId,
+          request.releaseId,
+          request.deploymentBlock,
+          request.artifactChecksum,
+        ].join('|'),
+      )
+      .digest('hex');
+  }
+
+  /** Reserve idempotency key; returns false if already reserved (duplicate). */
+  private async reserveIdempotencyKey(
+    tx: EntityManager,
+    idempotencyKey: string,
+    attemptId: string,
+  ): Promise<boolean> {
+    const result = await tx.query(
+      `INSERT INTO dead_letter_replay_reservations (idempotency_key, attempt_id, created_at)
+       VALUES ($1, $2, now())
+       ON CONFLICT (idempotency_key) DO NOTHING
+       RETURNING idempotency_key`,
+      [idempotencyKey, attemptId],
+    );
+    return Array.isArray(result) && result.length > 0;
+  }
+
+  /** Persist immutable link between original and replay references. */
+  private async recordReplayLinkage(
+    tx: EntityManager,
+    link: {
+      idempotencyKey: string;
+      originalMessageId: string;
+      originalPayloadHash: string;
+      replayReference: string;
+      attemptId: string;
+      chainId: number;
+      releaseId: string;
+      deploymentBlock: string;
+      artifactChecksum: string;
+      processed: number;
+      skipped: number;
+      failed: number;
+      stopped: boolean;
+    },
+  ): Promise<void> {
+    await tx.query(
+      `INSERT INTO dead_letter_replay_links
+       (idempotency_key, original_message_id, original_payload_hash, replay_reference,
+        attempt_id, chain_id, release_id, deployment_block, artifact_checksum,
+        processed, skipped, failed, stopped, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())`,
+      [
+        link.idempotencyKey,
+        link.originalMessageId,
+        link.originalPayloadHash,
+        link.replayReference,
+        link.attemptId,
+        link.chainId,
+        link.releaseId,
+        link.deploymentBlock,
+        link.artifactChecksum,
+        link.processed,
+        link.skipped,
+        link.failed,
+        link.stopped,
+      ],
+    );
+  }
+
+  private sanitizeReplayRequest(
+    request: DeadLetterReplayRequest,
+  ): DeadLetterReplayRequest {
+    if (!request || typeof request !== 'object')
+      throw new Error('Replay request required');
+    if (typeof request.capability !== 'string' || !CODE.test(request.capability))
+      throw new Error('Replay capability required');
+    for (const value of [
+      request.actorId,
+      request.authorityReference,
+      request.correlationId,
+      request.originalMessageId,
+      request.releaseId,
+    ]) {
+      if (typeof value !== 'string' || !UUID.test(value))
+        throw new Error('Replay references must be UUIDs');
+    }
+    if (typeof request.reason !== 'string' || request.reason.trim().length < 8)
+      throw new Error('Replay requires a meaningful reason');
+    if (!HEX_SHA256.test(request.originalPayloadHash))
+      throw new Error('Replay requires original payload hash');
+    if (!Number.isSafeInteger(request.chainId) || request.chainId <= 0)
+      throw new Error('Replay requires valid chain id');
+    if (!BLOCK.test(request.deploymentBlock))
+      throw new Error('Replay requires valid deployment block');
+    if (!HEX_SHA256.test(request.artifactChecksum))
+      throw new Error('Replay requires artifact checksum');
+    const maxBatch = request.maxBatch ?? DEFAULT_BATCH_LIMIT;
+    if (
+      !Number.isInteger(maxBatch) ||
+      maxBatch < 1 ||
+      maxBatch > MAX_BATCH_LIMIT
+    )
+      throw new Error('Replay batch limit out of bounds');
+    return {
+      capability: request.capability,
+      actorId: request.actorId,
+      authorityReference: request.authorityReference,
+      correlationId: request.correlationId,
+      reason: request.reason.trim(),
+      originalMessageId: request.originalMessageId,
+      originalPayloadHash: request.originalPayloadHash,
+      chainId: request.chainId,
+      releaseId: request.releaseId,
+      deploymentBlock: request.deploymentBlock,
+      artifactChecksum: request.artifactChecksum,
+      maxBatch,
+      dryRun: request.dryRun !== false,
+      stop: request.stop === true,
+    };
   }
 
   private async append(
