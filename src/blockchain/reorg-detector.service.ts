@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { BlockchainStateService } from './state.service';
+import { ClaimsCache } from '../cache/claims.cache';
 import { BlockInfo, ReorgEvent, PendingEvent } from './types';
 
 /**
@@ -19,6 +20,7 @@ export class ReorgDetectorService {
   constructor(
     private stateService: BlockchainStateService,
     private configService: ConfigService,
+    private claimsCache: ClaimsCache,
   ) {
     this.confirmationDepth = this.configService.get<number>(
       'BLOCKCHAIN_CONFIRMATION_DEPTH',
@@ -40,9 +42,8 @@ export class ReorgDetectorService {
       return null; // First block, no reorg possible
     }
 
-    const expectedParent = await this.stateService.getCanonicalBlock(
-      previousBlockNumber,
-    );
+    const expectedParent =
+      await this.stateService.getCanonicalBlock(previousBlockNumber);
 
     if (!expectedParent) {
       return null;
@@ -82,6 +83,13 @@ export class ReorgDetectorService {
         `Orphaned events: ${orphanedEventIds.length}`,
     );
 
+    // Invalidate all cached claims since blockchain state has changed
+    // This maintains the invariant that smart contracts are always the source of truth
+    await this.claimsCache.invalidateBlockRange(
+      affectedBlockStart,
+      affectedBlockEnd,
+    );
+
     return reorg;
   }
 
@@ -96,9 +104,8 @@ export class ReorgDetectorService {
     // We compare the expected hash in our current chain at each depth
     // with the canonical block at that height
     while (checkBlockNumber > 0 && divergenceDepth <= 1000) {
-      const canonicalBlock = await this.stateService.getCanonicalBlock(
-        checkBlockNumber,
-      );
+      const canonicalBlock =
+        await this.stateService.getCanonicalBlock(checkBlockNumber);
 
       if (
         canonicalBlock &&
@@ -107,25 +114,29 @@ export class ReorgDetectorService {
         divergenceDepth++;
         checkBlockNumber--;
       } else {
-      // Calculate what the block hash should be at this depth in our current chain
-      let expectedHash: string;
-      if (divergenceDepth === 0) {
-        // At depth 0, we're looking at the current block itself
-        expectedHash = currentBlock.hash;
-      } else {
-        // For depth > 0, we need to get the ancestor at this depth
-        expectedHash = await this.getAncestorHashAtDepth(currentBlock, divergenceDepth);
-      }
+        // Calculate what the block hash should be at this depth in our current chain
+        let expectedHash: string;
+        if (divergenceDepth === 0) {
+          // At depth 0, we're looking at the current block itself
+          expectedHash = currentBlock.hash;
+        } else {
+          // For depth > 0, we need to get the ancestor at this depth
+          expectedHash = await this.getAncestorHashAtDepth(
+            currentBlock,
+            divergenceDepth,
+          );
+        }
 
-      // If we don't have a canonical block at this height, or the hashes don't match,
-      // we've found the divergence point (the first block where they don't match)
-      if (!canonicalBlock || canonicalBlock.blockHash !== expectedHash) {
-        // Found the point where chains diverge
-        break;
-      } else {
-        // Chains still match, go deeper (check next block back)
-        divergenceDepth++;
-        checkBlockNumber--;
+        // If we don't have a canonical block at this height, or the hashes don't match,
+        // we've found the divergence point (the first block where they don't match)
+        if (!canonicalBlock || canonicalBlock.blockHash !== expectedHash) {
+          // Found the point where chains diverge
+          break;
+        } else {
+          // Chains still match, go deeper (check next block back)
+          divergenceDepth++;
+          checkBlockNumber--;
+        }
       }
     }
 
@@ -133,26 +144,28 @@ export class ReorgDetectorService {
   }
 
   /**
-   * Get all events affected by reorg.
    * Get the hash of the ancestor at a specific depth from the current block
    * @param currentBlock The current block to start from
    * @param depth How many blocks back to go (0 = current block, 1 = parent, 2 = grandparent, etc.)
    * @returns The hash of the ancestor at the specified depth
    */
-  private async getAncestorHashAtDepth(currentBlock: BlockInfo, depth: number): Promise<string> {
+  private async getAncestorHashAtDepth(
+    currentBlock: BlockInfo,
+    depth: number,
+  ): Promise<string> {
     if (depth < 0) {
       throw new Error('Depth must be >= 0');
     }
-    
+
     // For depth 0, we're at the current block
     if (depth === 0) {
       return currentBlock.hash;
     }
-    
+
     // Start with the current block
     let hash = currentBlock.hash;
     let currentDepth = 0;
-    
+
     // Traverse back 'depth' times to get the ancestor at that depth
     while (currentDepth < depth) {
       const block = await this.stateService.getCanonicalBlockByHash(hash);
@@ -163,7 +176,7 @@ export class ReorgDetectorService {
       hash = block.parentHash;
       currentDepth++;
     }
-    
+
     return hash;
   }
   private async getAffectedEvents(

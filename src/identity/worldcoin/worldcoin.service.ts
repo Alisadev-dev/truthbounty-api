@@ -3,13 +3,13 @@ import {
   ConflictException,
   BadRequestException,
   Logger,
-  Optional,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import { WorldIdVerification } from './entities/world-id-verification.entity';
-import { SafeHttpClientService } from '../../common/security/ssrf';
+import { PrismaService } from '../../prisma/prisma.service';
+import { SybilResistanceService } from '../../sybil-resistance/sybil-resistance.service';
 
 export interface VerifyWorldcoinProofDto {
   proof: {
@@ -35,11 +35,9 @@ export class WorldcoinService {
     @InjectRepository(WorldIdVerification)
     private readonly worldIdVerificationRepository: Repository<WorldIdVerification>,
     private readonly configService: ConfigService,
-    @Optional()
-    httpClient?: SafeHttpClientService,
-  ) {
-    this.httpClient = httpClient ?? new SafeHttpClientService();
-  }
+    private readonly prisma: PrismaService,
+    private readonly sybilResistanceService: SybilResistanceService,
+  ) {}
 
   async verifyProof(
     userId: string,
@@ -55,17 +53,21 @@ export class WorldcoinService {
     }
 
     // Check if nullifier hash has already been used (prevent duplicate verification)
-    const existingVerification =
+    const existingVerificationTypeORM =
       await this.worldIdVerificationRepository.findOne({
         where: { nullifierHash: proof.nullifier_hash },
       });
+    const existingVerificationPrisma =
+      await this.prisma.worldIdVerification.findUnique({
+        where: { nullifierHash: proof.nullifier_hash },
+      });
 
-    if (existingVerification) {
+    if (existingVerificationTypeORM || existingVerificationPrisma) {
       throw new ConflictException('This Worldcoin proof has already been used');
     }
 
-    // Create and save verification record
-    const verification = this.worldIdVerificationRepository.create({
+    // Create and save verification record in both (for compatibility)
+    const verificationTypeORM = this.worldIdVerificationRepository.create({
       userId,
       nullifierHash: proof.nullifier_hash,
       verificationLevel: proof.verification_level,
@@ -74,8 +76,33 @@ export class WorldcoinService {
       merkleRoot: proof.merkle_root,
       proof: proof.proof,
     });
+    const savedVerification =
+      await this.worldIdVerificationRepository.save(verificationTypeORM);
 
-    return await this.worldIdVerificationRepository.save(verification);
+    // Save to Prisma as well
+    await this.prisma.worldIdVerification.create({
+      data: {
+        userId,
+        nullifierHash: proof.nullifier_hash,
+        verificationLevel: proof.verification_level,
+        worldcoinAppId:
+          this.configService.get<string>('WORLDCOIN_APP_ID') || '',
+        worldcoinAction: action,
+        merkleRoot: proof.merkle_root,
+        proof: proof.proof,
+      },
+    });
+
+    // Update user's worldcoinVerified status in Prisma
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: { worldcoinVerified: true },
+    });
+
+    // Recalculate sybil score
+    await this.sybilResistanceService.recordSybilScore(userId);
+
+    return savedVerification;
   }
 
   private async verifyWorldcoinProof(
@@ -151,6 +178,10 @@ export class WorldcoinService {
 
   async isUserVerified(userId: string): Promise<boolean> {
     const verification = await this.getVerificationStatus(userId);
-    return verification !== null;
+    const prismaVerification = await this.prisma.worldIdVerification.findFirst({
+      where: { userId },
+      orderBy: { verifiedAt: 'desc' },
+    });
+    return verification !== null || prismaVerification !== null;
   }
 }

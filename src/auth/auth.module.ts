@@ -5,9 +5,16 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { AuthService } from './auth.service';
 import { AuthController } from './auth.controller';
 import { JwtStrategy } from './strategies/jwt.strategy';
+import { SiweService } from './services/siwe.service';
+import { TokenService } from './services/token.service';
+import { WalletRateLimiterService } from './wallet-rate-limiter.service';
+import { AuthorizationPolicyService } from './authorization-policy.service';
 import { PrismaModule } from '../prisma/prisma.module';
 import { JwtAuthGuard } from './jwt-auth.guard';
 import { OptionalJwtAuthGuard } from './optional-jwt-auth.guard';
+import { AdminGuard } from './guards/admin.guard';
+import { RolesGuard } from './guards/roles.guard';
+import { ServiceAuthGuard } from './guards/service-auth.guard';
 
 @Module({
   imports: [
@@ -17,15 +24,42 @@ import { OptionalJwtAuthGuard } from './optional-jwt-auth.guard';
       imports: [ConfigModule],
       inject: [ConfigService],
       useFactory: (configService: ConfigService) => ({
-        secret: configService.get<string>('JWT_SECRET', 'truthbounty-secret-key-change-in-production'),
+        secret: configService.get<string>(
+          'JWT_SECRET',
+          'truthbounty-secret-key-change-in-production',
+        ),
         signOptions: {
-          expiresIn: configService.get<string>('JWT_EXPIRATION', '7d') as any,
+          expiresIn: configService.get<string>('JWT_EXPIRATION', '15m') as any,
         },
       }),
     }),
   ],
   controllers: [AuthController],
-  providers: [AuthService, JwtStrategy, JwtAuthGuard, OptionalJwtAuthGuard],
-  exports: [AuthService, JwtAuthGuard, OptionalJwtAuthGuard, PassportModule],
+  providers: [
+    AuthService,
+    SiweService,
+    TokenService,
+    WalletRateLimiterService,
+    AuthorizationPolicyService,
+    JwtStrategy,
+    JwtAuthGuard,
+    OptionalJwtAuthGuard,
+    AdminGuard,
+    RolesGuard,
+    ServiceAuthGuard,
+  ],
+  exports: [
+    AuthService,
+    SiweService,
+    TokenService,
+    WalletRateLimiterService,
+    AuthorizationPolicyService,
+    JwtAuthGuard,
+    OptionalJwtAuthGuard,
+    AdminGuard,
+    RolesGuard,
+    ServiceAuthGuard,
+    PassportModule,
+  ],
 })
 export class AuthModule {}

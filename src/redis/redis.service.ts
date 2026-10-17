@@ -1,10 +1,15 @@
-import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  OnModuleInit,
+  OnModuleDestroy,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import Redis from 'ioredis';
 
 /**
  * Redis Service
- * 
+ *
  * Provides Redis caching functionality with graceful degradation.
  * If Redis is unavailable, the service will log warnings but allow the app to continue.
  */
@@ -17,8 +22,9 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
   constructor(private configService: ConfigService) {}
 
   async onModuleInit() {
-    const redisEnabled = this.configService.get<string>('REDIS_ENABLED', 'true') === 'true';
-    
+    const redisEnabled =
+      this.configService.get<string>('REDIS_ENABLED', 'true') === 'true';
+
     if (!redisEnabled) {
       this.logger.warn('Redis is disabled via configuration');
       return;
@@ -29,7 +35,8 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
       const port = this.configService.get<number>('REDIS_PORT', 6379);
       const password = this.configService.get<string>('REDIS_PASSWORD');
       const db = this.configService.get<number>('REDIS_DB', 0);
-      const tls = this.configService.get<string>('REDIS_TLS', 'false') === 'true';
+      const tls =
+        this.configService.get<string>('REDIS_TLS', 'false') === 'true';
 
       this.client = new Redis({
         host,
@@ -120,6 +127,34 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * Set a key only if it does not exist (SETNX) with optional TTL
+   * Returns true if key was set (new key), false if key already existed or Redis unavailable.
+   */
+  async setnx(
+    key: string,
+    value: string,
+    ttlSeconds?: number,
+  ): Promise<boolean> {
+    if (!this.client || !this.isConnected) {
+      this.logger.debug(`Redis unavailable, skipping SETNX for key: ${key}`);
+      return true; // allow execution when Redis is unavailable (fallback to DB)
+    }
+
+    try {
+      let res: 'OK' | null;
+      if (ttlSeconds) {
+        res = await this.client.set(key, value, 'EX', ttlSeconds, 'NX');
+      } else {
+        res = await this.client.set(key, value, 'NX');
+      }
+      return res === 'OK';
+    } catch (error) {
+      this.logger.error(`Redis SETNX error for key ${key}: ${error.message}`);
+      return true; // fallback to DB on error
+    }
+  }
+
+  /**
    * Delete a key from Redis
    */
   async del(key: string): Promise<boolean> {
@@ -138,6 +173,133 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * Add one or more members to a Redis set
+   */
+  async sAdd(key: string, ...members: string[]): Promise<boolean> {
+    if (!this.client || !this.isConnected) {
+      this.logger.debug(`Redis unavailable, skipping SADD for key: ${key}`);
+      return false;
+    }
+
+    try {
+      await this.client.sadd(key, ...members);
+      return true;
+    } catch (error) {
+      this.logger.error(
+        `Redis SADD error for key ${key}: ${(error as Error).message}`,
+      );
+      return false;
+    }
+  }
+
+  /**
+   * Remove one or more members from a Redis set
+   */
+  async sRemove(key: string, ...members: string[]): Promise<boolean> {
+    if (!this.client || !this.isConnected) {
+      this.logger.debug(`Redis unavailable, skipping SREM for key: ${key}`);
+      return false;
+    }
+
+    try {
+      await this.client.srem(key, ...members);
+      return true;
+    } catch (error) {
+      this.logger.error(
+        `Redis SREM error for key ${key}: ${(error as Error).message}`,
+      );
+      return false;
+    }
+  }
+
+  /**
+   * Get all members of a Redis set (empty array when unavailable)
+   */
+  async sMembers(key: string): Promise<string[]> {
+    if (!this.client || !this.isConnected) {
+      this.logger.debug(`Redis unavailable, skipping SMEMBERS for key: ${key}`);
+      return [];
+    }
+
+    try {
+      return await this.client.smembers(key);
+    } catch (error) {
+      this.logger.error(
+        `Redis SMEMBERS error for key ${key}: ${(error as Error).message}`,
+      );
+      return [];
+    }
+  }
+
+  /**
+   * Return remaining TTL in seconds for a key (-1 = no TTL, -2 = missing, null = unavailable)
+   */
+  async ttl(key: string): Promise<number | null> {
+    if (!this.client || !this.isConnected) {
+      this.logger.debug(`Redis unavailable, skipping TTL for key: ${key}`);
+      return null;
+    }
+
+    try {
+      return await this.client.ttl(key);
+    } catch (error) {
+      this.logger.error(`Redis TTL error for key ${key}: ${error.message}`);
+      return null;
+    }
+  }
+
+  /**
+   * Execute a Lua script
+   */
+  async eval(script: string, numKeys: number, ...args: any[]): Promise<any> {
+    if (!this.client || !this.isConnected) {
+      this.logger.error('Redis unavailable, failing closed for rate limit');
+      throw new Error('Redis unavailable (Fail Closed)');
+    }
+
+    try {
+      return await this.client.eval(script, numKeys, ...args);
+    } catch (error) {
+      this.logger.error(`Redis EVAL error: ${error.message}`);
+      throw new Error('Redis operation failed (Fail Closed)');
+    }
+  }
+
+  /**
+   * Return remaining TTL in milliseconds for a key
+   */
+  async pttl(key: string): Promise<number> {
+    if (!this.client || !this.isConnected) {
+      this.logger.error('Redis unavailable, failing closed for rate limit');
+      throw new Error('Redis unavailable (Fail Closed)');
+    }
+
+    try {
+      return await this.client.pttl(key);
+    } catch (error) {
+      this.logger.error(`Redis PTTL error for key ${key}: ${error.message}`);
+      throw new Error('Redis operation failed (Fail Closed)');
+    }
+  }
+
+  /**
+   * Check if key exists
+   */
+  async exists(key: string): Promise<number> {
+    if (!this.client || !this.isConnected) {
+      this.logger.error('Redis unavailable, failing closed for rate limit');
+      throw new Error('Redis unavailable (Fail Closed)');
+    }
+
+    try {
+      return await this.client.exists(key);
+    } catch (error) {
+      this.logger.error(`Redis EXISTS error for key ${key}: ${error.message}`);
+      throw new Error('Redis operation failed (Fail Closed)');
+    }
+  }
+
+  /**
    * Check if Redis is healthy and connected
    */
   async isHealthy(): Promise<boolean> {
@@ -150,6 +312,25 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
       return result === 'PONG';
     } catch (error) {
       this.logger.error(`Redis health check failed: ${error.message}`);
+      return false;
+    }
+  }
+
+  /**
+   * Flush all Redis data (use with extreme caution)
+   */
+  async flushall(): Promise<boolean> {
+    if (!this.client || !this.isConnected) {
+      this.logger.warn('Redis unavailable, skipping FLUSHALL');
+      return false;
+    }
+
+    try {
+      await this.client.flushall();
+      this.logger.warn('Redis flushed all data');
+      return true;
+    } catch (error) {
+      this.logger.error(`Redis FLUSHALL error: ${error.message}`);
       return false;
     }
   }

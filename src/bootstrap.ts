@@ -1,5 +1,6 @@
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import { json, urlencoded } from 'express';
 import { Logger } from 'nestjs-pino';
 
 export function createGlobalValidationPipe() {
@@ -26,11 +27,16 @@ export function configureApp(app: INestApplication) {
     httpAdapter.set('trust proxy', false);
   }
 
+  httpAdapter.use(json({ limit: '100kb' }));
+  httpAdapter.use(urlencoded({ extended: true, limit: '100kb' }));
+
   app.useGlobalPipes(createGlobalValidationPipe());
 
   const config = new DocumentBuilder()
     .setTitle('TruthBounty API')
-    .setDescription('## Decentralized News Verification Infrastructure\n\nThis API provides endpoints for managing claims, disputes, identity verification, rewards, and blockchain event indexing.\n\n### API Version\n- **Version**: 1.0\n- **Base Path**: `/`\n\n### Authentication\nMost mutating endpoints (POST, PATCH, PUT, DELETE) require authentication using wallet signature-based JWT tokens.\n\n#### Authentication Flow:\n1. Request a challenge: `POST /auth/challenge` with your wallet address\n2. Sign the challenge message with your wallet\n3. Login: `POST /auth/login` with address, signature, and message\n4. Use the returned JWT token in the `Authorization` header as `Bearer <token>`\n\nRead-only endpoints (GET) remain public unless specifically protected.\n\n### Rate Limiting\nSome endpoints are rate-limited using wallet-based throttling.')
+    .setDescription(
+      '## Decentralized News Verification Infrastructure\n\nThis API provides endpoints for managing claims, disputes, identity verification, rewards, and blockchain event indexing.\n\n### API Version\n- **Version**: 1.0\n- **Base Path**: `/`\n\n### Authentication\nMost mutating endpoints (POST, PATCH, PUT, DELETE) require authentication using wallet signature-based JWT tokens.\n\n#### Authentication Flow:\n1. Request a challenge: `POST /auth/challenge` with your wallet address\n2. Sign the challenge message with your wallet\n3. Login: `POST /auth/login` with address, signature, and message\n4. Use the returned JWT token in the `Authorization` header as `Bearer <token>`\n\nRead-only endpoints (GET) remain public unless specifically protected.\n\n### Rate Limiting\nSome endpoints are rate-limited using wallet-based throttling.',
+    )
     .setVersion('1.0')
     .addBearerAuth(
       {
@@ -54,8 +60,20 @@ export function configureApp(app: INestApplication) {
     .addTag('indexer', 'Event indexer management')
     .addTag('rewards', 'Reward management')
     .addTag('leaderboard', 'User leaderboard rankings')
-    .addTag('audit', 'Audit log retrieval')
+    .addTag(
+      'audit',
+      'Audit logging, search, compliance reporting, and retention management',
+    )
+    .addTag('support', 'Privacy-safe support intake and retention controls')
     .addTag('health', 'Health check endpoints')
+    .addTag(
+      'Operations',
+      'Protected operational queue reads, safe-retry eligibility and submission, and audit-record lookup (UX-BE-004)',
+    )
+    .addTag(
+      'ai-assistant',
+      'AI assistant conversations, knowledge-base retrieval, and usage analytics',
+    )
     .build();
 
   const document = SwaggerModule.createDocument(app, config);

@@ -1,0 +1,1 @@
+export const MIN_AGGREGATION_CONFIDENCE = 0.5;

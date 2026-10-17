@@ -1,0 +1,182 @@
+import { Processor, WorkerHost } from '@nestjs/bullmq';
+import { Job } from 'bullmq';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
+import { Logger } from '@nestjs/common';
+import {
+  Notification,
+  NotificationDeliveryHistory,
+  DeliveryStatus,
+  NotificationChannel as ChannelType,
+} from '../entities/notification.entity';
+import { NotificationChannel } from '../channels/channel.interface';
+import { DeliveryChannel } from '../interfaces/notification.types';
+import { parseDeliveryChannel } from '../delivery/delivery-channel';
+import { UnknownDeliveryChannelError } from '../delivery/delivery-error';
+import { toRenderedNotificationPayload } from '../delivery/rendered-notification-payload';
+
+interface NotificationJobData {
+  notificationId: string;
+  channel: string;
+  retryCount: number;
+}
+
+@Processor('notifications')
+export class NotificationProcessor extends WorkerHost {
+  private readonly logger = new Logger(NotificationProcessor.name);
+
+  // Canonical channel → provider. Untrusted values are never used as keys.
+  private readonly channelMap: Map<DeliveryChannel, NotificationChannel> = new Map();
+
+  constructor(
+    @InjectRepository(Notification)
+    private readonly notificationRepository: Repository<Notification>,
+    @InjectRepository(NotificationDeliveryHistory)
+    private readonly deliveryHistoryRepository: Repository<NotificationDeliveryHistory>,
+    // Inject all channel implementations
+    private readonly channels: NotificationChannel[],
+  ) {
+    super();
+    // Build the channel map keyed by the canonical channel identifier.
+    this.channels.forEach((channel) => {
+      const canonical = parseDeliveryChannel(channel.channelType);
+      if (canonical) {
+        this.channelMap.set(canonical, channel);
+      }
+    });
+  }
+
+  async process(job: Job<NotificationJobData>): Promise<void> {
+    if (job.name === 'dead-letter') {
+      await this.processDeadLetter(job);
+      return;
+    }
+    await this.processDelivery(job);
+  }
+
+  async processDelivery(job: Job<NotificationJobData>) {
+    const { notificationId, channel: channelType, retryCount } = job.data;
+
+    this.logger.debug(
+      `Processing delivery job for notification ${notificationId} via ${channelType}, attempt ${retryCount + 1}`,
+    );
+
+    // Canonicalize the channel before it can reach a provider. Null/unknown
+    // channels fail closed here instead of being coerced downstream.
+    const canonicalChannel = parseDeliveryChannel(channelType);
+    if (canonicalChannel === null) {
+      throw new UnknownDeliveryChannelError(
+        `Unknown or missing delivery channel: ${String(channelType)}`,
+      );
+    }
+
+    const channel = this.channelMap.get(canonicalChannel);
+    if (!channel) {
+      this.logger.error(`Unknown channel type: ${channelType}`);
+      throw new UnknownDeliveryChannelError(
+        `No provider registered for channel: ${canonicalChannel}`,
+      );
+    }
+
+    // Get the notification
+    const notification = await this.notificationRepository.findOne({
+      where: { id: notificationId },
+    });
+
+    if (!notification) {
+      this.logger.error(`Notification ${notificationId} not found`);
+      throw new Error(`Notification not found: ${notificationId}`);
+    }
+
+    // Create or update delivery history
+    let deliveryHistory = await this.deliveryHistoryRepository.findOne({
+      where: {
+        notificationId,
+        channel: channelType as ChannelType,
+      },
+    });
+
+    if (!deliveryHistory) {
+      deliveryHistory = this.deliveryHistoryRepository.create({
+        notificationId,
+        recipientId: notification.recipientId,
+        channel: channelType as ChannelType,
+        status: DeliveryStatus.RETRYING,
+        retryAttempts: retryCount,
+      });
+    } else {
+      deliveryHistory.retryAttempts = retryCount;
+      deliveryHistory.status = DeliveryStatus.RETRYING;
+    }
+    await this.deliveryHistoryRepository.save(deliveryHistory);
+
+    try {
+      // Check if channel is enabled for this user
+      const isEnabled = await channel.isEnabled(
+        notification.recipientId ?? notification.userId,
+      );
+      if (!isEnabled) {
+        this.logger.debug(
+          `Channel ${channelType} is disabled for user ${notification.recipientId}, skipping delivery`,
+        );
+        deliveryHistory.status = DeliveryStatus.DELIVERED;
+        await this.deliveryHistoryRepository.save(deliveryHistory);
+        return;
+      }
+
+      // Send the notification through the single canonical payload type.
+      const payload = toRenderedNotificationPayload(
+        notification,
+        canonicalChannel,
+      );
+      const result = await channel.send(payload);
+
+      if (result.success) {
+        this.logger.debug(
+          `Successfully delivered notification ${notificationId} via ${channelType}`,
+        );
+        deliveryHistory.status = DeliveryStatus.DELIVERED;
+        deliveryHistory.deliveredAt = result.deliveryTimestamp || new Date();
+        await this.deliveryHistoryRepository.save(deliveryHistory);
+      } else {
+        this.logger.warn(
+          `Failed to deliver notification ${notificationId} via ${channelType}: ${result.error}`,
+        );
+        deliveryHistory.status = DeliveryStatus.FAILED;
+        deliveryHistory.failureReason = result.error || 'Unknown error';
+        await this.deliveryHistoryRepository.save(deliveryHistory);
+        throw new Error(result.error || 'Delivery failed');
+      }
+    } catch (error) {
+      this.logger.error(
+        `Exception while delivering notification ${notificationId} via ${channelType}: ${error.message}`,
+        error.stack,
+      );
+      deliveryHistory.status = DeliveryStatus.FAILED;
+      deliveryHistory.failureReason = error.message;
+      await this.deliveryHistoryRepository.save(deliveryHistory);
+      throw error; // This will trigger a retry according to queue settings
+    }
+  }
+
+  async processDeadLetter(job: Job<NotificationJobData>) {
+    const { notificationId, channel: channelType } = job.data;
+
+    this.logger.warn(
+      `Moving notification ${notificationId} to dead letter queue for channel ${channelType}`,
+    );
+
+    // Update delivery history to mark as dead letter
+    const deliveryHistory = await this.deliveryHistoryRepository.findOne({
+      where: {
+        notificationId,
+        channel: channelType as ChannelType,
+      },
+    });
+
+    if (deliveryHistory) {
+      deliveryHistory.status = DeliveryStatus.DEAD_LETTER;
+      await this.deliveryHistoryRepository.save(deliveryHistory);
+    }
+  }
+}
