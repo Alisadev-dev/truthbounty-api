@@ -1,15 +1,21 @@
+/* eslint-disable @typescript-eslint/unbound-method */
 import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { WorldcoinService } from './worldcoin.service';
 import { WorldIdVerification } from './entities/world-id-verification.entity';
+import { SafeHttpClientService } from '../../common/security/ssrf';
 
 describe('WorldcoinService', () => {
   let service: WorldcoinService;
   let repository: jest.Mocked<Repository<WorldIdVerification>>;
   let configService: jest.Mocked<ConfigService>;
-  let fetchMock: jest.Mock;
+  let mockHttpClient: {
+    post: jest.Mock;
+    get: jest.Mock;
+    request: jest.Mock;
+  };
 
   const mockRepository = {
     findOne: jest.fn(),
@@ -22,6 +28,16 @@ describe('WorldcoinService', () => {
   };
 
   beforeEach(async () => {
+    mockHttpClient = {
+      post: jest.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: () => ({ success: true }),
+      }),
+      get: jest.fn(),
+      request: jest.fn(),
+    };
+
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         WorldcoinService,
@@ -33,29 +49,26 @@ describe('WorldcoinService', () => {
           provide: ConfigService,
           useValue: mockConfigService,
         },
+        {
+          provide: SafeHttpClientService,
+          useValue: mockHttpClient,
+        },
       ],
     }).compile();
 
     service = module.get<WorldcoinService>(WorldcoinService);
     repository = module.get(getRepositoryToken(WorldIdVerification));
     configService = module.get(ConfigService);
-    fetchMock = jest.fn();
-    global.fetch = fetchMock as typeof fetch;
 
     // Setup default config values
     configService.get.mockImplementation((key: string) => {
       const config = {
-        'WORLDCOIN_APP_ID': 'test-app-id',
-        'WORLDCOIN_ACTION': 'test-action',
-        'WORLDCOIN_VERIFY_BASE_URL': 'https://developer.worldcoin.org/api/v2/verify',
+        WORLDCOIN_APP_ID: 'test-app-id',
+        WORLDCOIN_ACTION: 'test-action',
+        WORLDCOIN_VERIFY_BASE_URL:
+          'https://developer.worldcoin.org/api/v2/verify',
       };
       return config[key];
-    });
-
-    fetchMock.mockResolvedValue({
-      ok: true,
-      status: 200,
-      json: jest.fn().mockResolvedValue({ success: true }),
     });
   });
 
@@ -79,7 +92,7 @@ describe('WorldcoinService', () => {
     it('should successfully verify a valid Worldcoin proof', async () => {
       // Mock no existing verification
       repository.findOne.mockResolvedValue(null);
-      
+
       // Mock created verification
       const mockVerification = {
         id: 'verification-id',
@@ -90,25 +103,24 @@ describe('WorldcoinService', () => {
         worldcoinAction: verifyDto.action,
         verifiedAt: new Date(),
       };
-      
+
       repository.create.mockReturnValue(mockVerification);
       repository.save.mockResolvedValue(mockVerification);
 
       const result = await service.verifyProof(userId, verifyDto);
 
       expect(result).toEqual(mockVerification);
-      expect(fetchMock).toHaveBeenCalledWith(
+      expect(mockHttpClient.post).toHaveBeenCalledWith(
         'https://developer.worldcoin.org/api/v2/verify/test-app-id',
+        JSON.stringify({
+          ...verifyDto.proof,
+          action: verifyDto.action,
+          signal: verifyDto.signal,
+        }),
         {
-          method: 'POST',
           headers: {
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify({
-            ...verifyDto.proof,
-            action: verifyDto.action,
-            signal: verifyDto.signal,
-          }),
         },
       );
       expect(repository.findOne).toHaveBeenCalledWith({
@@ -143,10 +155,10 @@ describe('WorldcoinService', () => {
     });
 
     it('should throw BadRequestException for invalid proof', async () => {
-      fetchMock.mockResolvedValue({
+      mockHttpClient.post.mockResolvedValue({
         ok: true,
         status: 200,
-        json: jest.fn().mockResolvedValue({ success: false }),
+        json: () => ({ success: false }),
       });
 
       repository.findOne.mockResolvedValue(null);
@@ -166,7 +178,7 @@ describe('WorldcoinService', () => {
         }),
       ).rejects.toThrow('Invalid Worldcoin proof');
 
-      expect(fetchMock).not.toHaveBeenCalled();
+      expect(mockHttpClient.post).not.toHaveBeenCalled();
     });
   });
 
@@ -180,7 +192,9 @@ describe('WorldcoinService', () => {
         verifiedAt: new Date(),
       };
 
-      repository.findOne.mockResolvedValue(mockVerification as WorldIdVerification);
+      repository.findOne.mockResolvedValue(
+        mockVerification as WorldIdVerification,
+      );
 
       const result = await service.getVerificationStatus(userId);
 
@@ -195,7 +209,9 @@ describe('WorldcoinService', () => {
   describe('isUserVerified', () => {
     it('should return true for verified user', async () => {
       const userId = 'test-user-123';
-      repository.findOne.mockResolvedValue({ id: 'verification-id' } as WorldIdVerification);
+      repository.findOne.mockResolvedValue({
+        id: 'verification-id',
+      } as WorldIdVerification);
 
       const result = await service.isUserVerified(userId);
 

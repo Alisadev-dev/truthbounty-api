@@ -1,8 +1,15 @@
-import { Injectable, ConflictException, BadRequestException, Logger } from '@nestjs/common';
+import {
+  Injectable,
+  ConflictException,
+  BadRequestException,
+  Logger,
+  Optional,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import { WorldIdVerification } from './entities/world-id-verification.entity';
+import { SafeHttpClientService } from '../../common/security/ssrf';
 
 export interface VerifyWorldcoinProofDto {
   proof: {
@@ -22,27 +29,36 @@ interface WorldcoinCloudVerifyResponse {
 @Injectable()
 export class WorldcoinService {
   private readonly logger = new Logger(WorldcoinService.name);
+  private readonly httpClient: SafeHttpClientService;
 
   constructor(
     @InjectRepository(WorldIdVerification)
     private readonly worldIdVerificationRepository: Repository<WorldIdVerification>,
     private readonly configService: ConfigService,
-  ) {}
+    @Optional()
+    httpClient?: SafeHttpClientService,
+  ) {
+    this.httpClient = httpClient ?? new SafeHttpClientService();
+  }
 
-  async verifyProof(userId: string, verifyDto: VerifyWorldcoinProofDto): Promise<WorldIdVerification> {
+  async verifyProof(
+    userId: string,
+    verifyDto: VerifyWorldcoinProofDto,
+  ): Promise<WorldIdVerification> {
     const { proof, action, signal } = verifyDto;
 
     // Verify the proof with Worldcoin
     const isValid = await this.verifyWorldcoinProof(proof, action, signal);
-    
+
     if (!isValid) {
       throw new BadRequestException('Invalid Worldcoin proof');
     }
 
     // Check if nullifier hash has already been used (prevent duplicate verification)
-    const existingVerification = await this.worldIdVerificationRepository.findOne({
-      where: { nullifierHash: proof.nullifier_hash },
-    });
+    const existingVerification =
+      await this.worldIdVerificationRepository.findOne({
+        where: { nullifierHash: proof.nullifier_hash },
+      });
 
     if (existingVerification) {
       throw new ConflictException('This Worldcoin proof has already been used');
@@ -80,28 +96,34 @@ export class WorldcoinService {
       }
 
       if (action !== expectedAction) {
-        this.logger.warn(`Worldcoin action mismatch: received ${action}, expected ${expectedAction}`);
+        this.logger.warn(
+          `Worldcoin action mismatch: received ${action}, expected ${expectedAction}`,
+        );
         return false;
       }
 
-      const response = await fetch(`${verifyBaseUrl}/${appId}`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
+      const response = await this.httpClient.post(
+        `${verifyBaseUrl}/${appId}`,
+        JSON.stringify({
           ...proof,
           action,
           ...(signal ? { signal } : {}),
         }),
-      });
+        {
+          headers: {
+            'Content-Type': 'application/json',
+          },
+        },
+      );
 
       if (!response.ok) {
-        this.logger.warn(`Worldcoin verification request failed with status ${response.status}`);
+        this.logger.warn(
+          `Worldcoin verification request failed with status ${response.status}`,
+        );
         return false;
       }
 
-      const result = (await response.json()) as WorldcoinCloudVerifyResponse;
+      const result = response.json<WorldcoinCloudVerifyResponse>();
 
       return result.success === true;
     } catch (error) {
@@ -110,14 +132,18 @@ export class WorldcoinService {
     }
   }
 
-  async getVerificationStatus(userId: string): Promise<WorldIdVerification | null> {
+  async getVerificationStatus(
+    userId: string,
+  ): Promise<WorldIdVerification | null> {
     return await this.worldIdVerificationRepository.findOne({
       where: { userId },
       order: { verifiedAt: 'DESC' },
     });
   }
 
-  async getVerificationByNullifierHash(nullifierHash: string): Promise<WorldIdVerification | null> {
+  async getVerificationByNullifierHash(
+    nullifierHash: string,
+  ): Promise<WorldIdVerification | null> {
     return await this.worldIdVerificationRepository.findOne({
       where: { nullifierHash },
     });
