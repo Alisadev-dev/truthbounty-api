@@ -5,11 +5,11 @@ import {
   NamingStrategyInterface,
 } from 'typeorm';
 import { DefaultNamingStrategy } from 'typeorm/naming-strategy/DefaultNamingStrategy';
+import { buildPoolConfig, buildPoolExtra } from '../database/pool.config';
 
 class SnakeNamingStrategy
   extends DefaultNamingStrategy
   implements NamingStrategyInterface {}
-
 
 /**
  * TypeORM DataSource configuration for TruthBounty V2.
@@ -59,20 +59,14 @@ function buildOptions(): DataSourceOptions {
                 env.DATABASE_SSL_REJECT_UNAUTHORIZED !== 'false',
             }
           : false,
-      // Connection pooling configuration
+      // Connection pooling, statement, and idle-transaction budgets.
+      // Built by the shared factory so CLI migrations and the runtime pool
+      // apply identical fail-closed bounds (pool size, acquisition timeout,
+      // statement timeout, idle-in-transaction timeout).
       extra: {
-        max: parseInt(env.DB_POOL_MAX ?? '20', 10),
-        idleTimeoutMillis: parseInt(
-          env.DB_POOL_IDLE_TIMEOUT ?? '30000',
-          10,
-        ),
-        connectionTimeoutMillis: parseInt(
-          env.DB_POOL_ACQUIRE_TIMEOUT ?? '60000',
-          10,
-        ),
-        // Retry strategy
         maxRetries: parseInt(env.DB_POOL_RETRIES ?? '3', 10),
         retryDelay: parseInt(env.DB_POOL_RETRY_DELAY ?? '1000', 10),
+        ...buildPoolExtra(buildPoolConfig(env)),
       },
     };
   }

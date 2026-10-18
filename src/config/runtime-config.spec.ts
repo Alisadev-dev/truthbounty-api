@@ -102,6 +102,14 @@ describe('runtime schema', () => {
   );
 
   it.each([
+    ['FINALITY_MAX_REORG_DEPTH', '100001'],
+    ['FINALITY_MAX_ANCESTOR_SEARCH', '0'],
+    ['DB_POOL_MAX', '101'],
+    ['DB_STATEMENT_TIMEOUT', '0'],
+    ['DB_POOL_BUDGET_JOBS', '0'],
+    ['PUBLIC_INCIDENTS_RATE_LIMIT', '0'],
+    ['CURSOR_TTL_SECONDS', 'NaN'],
+    ['METRICS_ENABLED', 'yes'],
     ['PUBLIC_STATUS_RATE_LIMIT', '0'],
     ['OPERATIONS_AUDIT_MAX', 'NaN'],
     ['ABUSE_SIGNALS_ENABLED', 'yes'],

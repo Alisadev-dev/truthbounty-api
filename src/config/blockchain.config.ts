@@ -15,6 +15,8 @@ export default registerAs('blockchain', () => {
       finalized: config.FINALITY_FINALIZED_CONFIRMATIONS,
       full: config.CONFIRMATIONS_FULL,
     },
+    finalityMaxReorgDepth: config.FINALITY_MAX_REORG_DEPTH,
+    finalityMaxAncestorSearch: config.FINALITY_MAX_ANCESTOR_SEARCH,
     maxBlocksInMemory: config.BLOCKCHAIN_MAX_BLOCKS,
     maxEventsInMemory: config.BLOCKCHAIN_MAX_EVENTS,
     maxReorgHistoryEntries: config.BLOCKCHAIN_MAX_REORG_HISTORY,

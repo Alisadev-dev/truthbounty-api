@@ -24,7 +24,7 @@ Legacy `RELEASE_MANIFEST_MAX_AGE_MS` must migrate to `CONTRACT_RELEASE_MAX_AGE_D
 | INDEXER_MAX_HEAD_AGE_SECONDS | integer 0..9007199254740991 | 120 | no | - |
 | INDEXER_RELEASE_ID | non-empty string | (unset) | no | - |
 | INDEXER_DEPLOYMENT_BLOCK | non-negative safe integer | (unset) | no | - |
-| INDEXER_ARTIFACT_CHECKSUM | 64-character lowercase SHA-256 | (unset) | no | - |
+| INDEXER_ARTIFACT_CHECKSUM | 64-character lowercase SHA-256 | (unset) | no | ARTIFACT_CHECKSUM |
 | PUBLIC_STATUS_CACHE_TTL_SECONDS | integer 1..9007199254740991 | 15 | no | - |
 | PUBLIC_STATUS_STALE_AFTER_SECONDS | integer 1..9007199254740991 | 120 | no | - |
 | PUBLIC_STATUS_WEB_HEALTH_URL | URL (https:, http:) | (unset) | no | - |
@@ -70,9 +70,17 @@ Legacy `RELEASE_MANIFEST_MAX_AGE_MS` must migrate to `CONTRACT_RELEASE_MAX_AGE_D
 | DATABASE_SYNCHRONIZE | true or false | false | no | - |
 | DATABASE_LOGGING | true or false | false | no | - |
 | SQLITE_PATH | non-empty string | database.sqlite | no | DATABASE_PATH |
-| DB_POOL_MAX | integer 1..1000 | 20 | no | - |
-| DB_POOL_IDLE_TIMEOUT | integer 1..9007199254740991 | 30000 | no | - |
-| DB_POOL_ACQUIRE_TIMEOUT | integer 1..9007199254740991 | 60000 | no | - |
+| DB_POOL_MAX | integer 1..100 | 20 | no | - |
+| DB_POOL_MIN | integer 0..50 | 2 | no | - |
+| DB_POOL_IDLE_TIMEOUT | integer 1000..120000 | (unset) | no | - |
+| DB_POOL_ACQUIRE_TIMEOUT | integer 1000..120000 | 30000 | no | - |
+| DB_STATEMENT_TIMEOUT | integer 1000..60000 | 15000 | no | - |
+| DB_IDLE_TRANSACTION_TIMEOUT | integer 1000..60000 | 10000 | no | - |
+| DB_TRANSACTION_DEADLINE | integer 1000..300000 | 30000 | no | - |
+| DB_POOL_BUDGET_API | integer 1..100 | (unset) | no | - |
+| DB_POOL_BUDGET_JOBS | integer 1..100 | (unset) | no | - |
+| DB_POOL_BUDGET_ADMIN | integer 1..100 | (unset) | no | - |
+| DB_POOL_BUDGET_DEFAULT | integer 1..100 | (unset) | no | - |
 | DB_POOL_RETRIES | integer 0..100 | 3 | no | - |
 | DB_POOL_RETRY_DELAY | integer 1..9007199254740991 | 1000 | no | - |
 | REDIS_ENABLED | true or false | true | no | - |
@@ -99,11 +107,13 @@ Legacy `RELEASE_MANIFEST_MAX_AGE_MS` must migrate to `CONTRACT_RELEASE_MAX_AGE_D
 | MAX_RETRY_ATTEMPTS | integer 0..100 | 3 | no | - |
 | POLLING_INTERVAL_MS | integer 1..9007199254740991 | 12000 | no | - |
 | MIN_BATCH_SIZE_FLOOR | integer 1..9007199254740991 | 1 | no | - |
+| FINALITY_MAX_REORG_DEPTH | integer 1..100000 | 64 | no | - |
+| FINALITY_MAX_ANCESTOR_SEARCH | integer 1..100000 | 64 | no | - |
 | ADAPTIVE_FILL_THRESHOLD_BLOCKS | integer 1..9007199254740991 | 10000 | no | - |
 | CONTRACT_RELEASE_MANIFEST_PATH | non-empty string | (unset) | yes | - |
 | CONTRACT_RELEASE_ID | non-empty string | (unset) | yes | RELEASE_ID |
 | CONTRACT_RELEASE_SHA256 | 64-character lowercase SHA-256 | (unset) | yes | - |
-| CONTRACT_RELEASE_DEPLOYMENT_BLOCK | integer 0..9007199254740991 | 0 | yes | - |
+| CONTRACT_RELEASE_DEPLOYMENT_BLOCK | integer 0..9007199254740991 | 0 | yes | DEPLOYMENT_BLOCK |
 | CONTRACT_RELEASE_MAX_AGE_DAYS | integer 1..365 | 90 | no | MANIFEST_MAX_AGE_DAYS |
 | CONTRACT_RELEASE_STRICT | true or false | true | no | - |
 | IPFS_PROVIDER | local / pinata / web3storage | local | no | - |
@@ -134,6 +144,15 @@ Legacy `RELEASE_MANIFEST_MAX_AGE_MS` must migrate to `CONTRACT_RELEASE_MAX_AGE_D
 | AI_REDACT_BEFORE_STORE | true or false | true | no | - |
 | LOG_LEVEL | trace / debug / info / warn / error / fatal / silent | info | no | - |
 | METRICS_TOKEN | non-empty string | (unset) | yes | - |
+| METRICS_ENABLED | true or false | true | no | - |
+| PUBLIC_INCIDENTS_CACHE_TTL_SECONDS | integer 1..9007199254740991 | 15 | no | - |
+| PUBLIC_INCIDENTS_STALE_AFTER_SECONDS | integer 1..9007199254740991 | 120 | no | - |
+| PUBLIC_INCIDENTS_RATE_LIMIT | integer 1..9007199254740991 | 60 | no | - |
+| PUBLIC_INCIDENTS_RATE_WINDOW_SECONDS | integer 1..9007199254740991 | 60 | no | - |
+| CURSOR_KEY_ID | non-empty string | (unset) | no | - |
+| CURSOR_KEY_SECRET | non-empty string | (unset) | no | - |
+| CURSOR_PREVIOUS_KEYS | non-empty string | (unset) | no | - |
+| CURSOR_TTL_SECONDS | integer 1..9007199254740991 | 3600 | no | - |
 | LOG_REDACT_RPC_URLS | true or false | true | no | - |
 | JWT_SECRET | non-empty string | (unset) | yes | - |
 | JWT_EXPIRATION | positive duration with s, m, h or d unit | 15m | no | - |
@@ -157,6 +176,14 @@ Legacy `RELEASE_MANIFEST_MAX_AGE_MS` must migrate to `CONTRACT_RELEASE_MAX_AGE_D
 | RATE_LIMIT_DEFAULT_TTL | integer 1..9007199254740991 | 60 | no | - |
 | RATE_LIMIT_DEFAULT_LIMIT | integer 1..9007199254740991 | 10 | no | - |
 | REALTIME_POLL_INTERVAL_MS | integer 1..9007199254740991 | 1000 | no | - |
+| REALTIME_ORIGINS | comma-separated non-empty values | (unset) | no | - |
+| REALTIME_TOPICS | comma-separated non-empty values | (unset) | no | - |
+| REALTIME_SUPPORTED_RELEASES | comma-separated non-empty values | (unset) | no | - |
+| REALTIME_RETENTION_SECONDS | integer 1..9007199254740991 | (unset) | no | - |
+| REALTIME_HEARTBEAT_SECONDS | integer 1..9007199254740991 | (unset) | no | - |
+| REALTIME_MAX_PAYLOAD_BYTES | integer 1..9007199254740991 | (unset) | no | - |
+| WORLDCOIN_MAX_ROOT_AGE_MS | integer 60000..9007199254740991 | 86400000 | no | - |
+| SEARCH_TIMEOUT_MS | integer 1..9007199254740991 | 5000 | no | - |
 | REALTIME_MAX_PUBLISH_BATCH | integer 1..9007199254740991 | 100 | no | - |
 | REALTIME_HEARTBEAT_INTERVAL_MS | integer 1..9007199254740991 | 15000 | no | - |
 | REALTIME_MAX_BACKLOG | integer 1..9007199254740991 | 1000 | no | - |

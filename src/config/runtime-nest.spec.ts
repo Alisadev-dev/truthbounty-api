@@ -62,6 +62,40 @@ describe('Nest runtime configuration boundary', () => {
     });
   });
 
+  it('preserves incoming pool, reorg, incident and metrics settings in the snapshot', async () => {
+    process.env = {
+      NODE_ENV: 'test',
+      DB_POOL_MAX: '10',
+      DB_POOL_ACQUIRE_TIMEOUT: '40000',
+      FINALITY_MAX_REORG_DEPTH: '12',
+      PUBLIC_INCIDENTS_RATE_LIMIT: '17',
+      METRICS_ENABLED: 'false',
+    };
+    await jest.isolateModulesAsync(async () => {
+      const { getRuntimeConfig } = await import('./runtime-config');
+      const { buildPoolConfig, Workload } =
+        await import('../database/pool.config');
+      const { loadPublicIncidentOptions } =
+        await import('../health/public-incidents/public-incidents.options');
+      const { isNotificationMetricsEnabled } =
+        await import('../metrics/metrics-enabled');
+      const { default: blockchain } = await import('./blockchain.config');
+      getRuntimeConfig();
+      process.env.DB_POOL_MAX = '99';
+      process.env.FINALITY_MAX_REORG_DEPTH = '99';
+      process.env.PUBLIC_INCIDENTS_RATE_LIMIT = '99';
+      process.env.METRICS_ENABLED = 'true';
+      const pool = buildPoolConfig();
+      expect(pool.poolMax).toBe(10);
+      expect(pool.idleTimeoutMs).toBe(40000);
+      expect(pool.budgets[Workload.API]).toBe(6);
+      expect(pool.statementTimeoutMs).toBe(15000);
+      expect(blockchain().finalityMaxReorgDepth).toBe(12);
+      expect(loadPublicIncidentOptions().rateLimit).toBe(17);
+      expect(isNotificationMetricsEnabled()).toBe(false);
+    });
+  });
+
   it('supplies new configuration loaders from the same frozen snapshot', async () => {
     process.env = {
       NODE_ENV: 'test',

@@ -39,8 +39,11 @@ function integer(
   };
 }
 
-function optionalInteger(): Field<number> {
-  const { parse, description } = integer(1);
+function optionalInteger(
+  min = 1,
+  max = Number.MAX_SAFE_INTEGER,
+): Field<number> {
+  const { parse, description } = integer(min, min, max);
   return { parse, description };
 }
 
@@ -170,6 +173,7 @@ export const runtimeSchema = {
   },
   INDEXER_ARTIFACT_CHECKSUM: {
     ...text(),
+    aliases: ['ARTIFACT_CHECKSUM'],
     description: '64-character lowercase SHA-256',
     parse(value: string) {
       if (!/^[a-f0-9]{64}$/.test(value)) throw new Error('invalid checksum');
@@ -234,9 +238,17 @@ export const runtimeSchema = {
     ...text({ default: 'database.sqlite' }),
     aliases: ['DATABASE_PATH'],
   },
-  DB_POOL_MAX: integer(20, 1, 1000),
-  DB_POOL_IDLE_TIMEOUT: integer(30000),
-  DB_POOL_ACQUIRE_TIMEOUT: integer(60000),
+  DB_POOL_MAX: integer(20, 1, 100),
+  DB_POOL_MIN: integer(2, 0, 50),
+  DB_POOL_IDLE_TIMEOUT: optionalInteger(1000, 120000),
+  DB_POOL_ACQUIRE_TIMEOUT: integer(30000, 1000, 120000),
+  DB_STATEMENT_TIMEOUT: integer(15000, 1000, 60000),
+  DB_IDLE_TRANSACTION_TIMEOUT: integer(10000, 1000, 60000),
+  DB_TRANSACTION_DEADLINE: integer(30000, 1000, 300000),
+  DB_POOL_BUDGET_API: optionalInteger(1, 100),
+  DB_POOL_BUDGET_JOBS: optionalInteger(1, 100),
+  DB_POOL_BUDGET_ADMIN: optionalInteger(1, 100),
+  DB_POOL_BUDGET_DEFAULT: optionalInteger(1, 100),
   DB_POOL_RETRIES: integer(3, 0, 100),
   DB_POOL_RETRY_DELAY: integer(1000),
   REDIS_ENABLED: boolean(true),
@@ -280,6 +292,8 @@ export const runtimeSchema = {
   MAX_RETRY_ATTEMPTS: integer(3, 0, 100),
   POLLING_INTERVAL_MS: integer(12000),
   MIN_BATCH_SIZE_FLOOR: integer(1),
+  FINALITY_MAX_REORG_DEPTH: integer(64, 1, 100000),
+  FINALITY_MAX_ANCESTOR_SEARCH: integer(64, 1, 100000),
   ADAPTIVE_FILL_THRESHOLD_BLOCKS: integer(10000),
   CONTRACT_RELEASE_MANIFEST_PATH: text({ productionRequired: true }),
   CONTRACT_RELEASE_ID: {
@@ -296,6 +310,7 @@ export const runtimeSchema = {
   },
   CONTRACT_RELEASE_DEPLOYMENT_BLOCK: {
     ...integer(0, 0),
+    aliases: ['DEPLOYMENT_BLOCK'],
     productionRequired: true,
   },
   CONTRACT_RELEASE_MAX_AGE_DAYS: {
@@ -337,6 +352,15 @@ export const runtimeSchema = {
     'info',
   ),
   METRICS_TOKEN: secret(true),
+  METRICS_ENABLED: boolean(true),
+  PUBLIC_INCIDENTS_CACHE_TTL_SECONDS: integer(15),
+  PUBLIC_INCIDENTS_STALE_AFTER_SECONDS: integer(120),
+  PUBLIC_INCIDENTS_RATE_LIMIT: integer(60),
+  PUBLIC_INCIDENTS_RATE_WINDOW_SECONDS: integer(60),
+  CURSOR_KEY_ID: text(),
+  CURSOR_KEY_SECRET: secret(),
+  CURSOR_PREVIOUS_KEYS: secret(),
+  CURSOR_TTL_SECONDS: integer(3600),
   LOG_REDACT_RPC_URLS: boolean(true),
   JWT_SECRET: secret(true),
   JWT_EXPIRATION: { ...duration, default: '15m' },
@@ -360,6 +384,14 @@ export const runtimeSchema = {
   RATE_LIMIT_DEFAULT_TTL: integer(60),
   RATE_LIMIT_DEFAULT_LIMIT: integer(10),
   REALTIME_POLL_INTERVAL_MS: integer(1000),
+  REALTIME_ORIGINS: list(),
+  REALTIME_TOPICS: list(),
+  REALTIME_SUPPORTED_RELEASES: list(),
+  REALTIME_RETENTION_SECONDS: optionalInteger(),
+  REALTIME_HEARTBEAT_SECONDS: optionalInteger(),
+  REALTIME_MAX_PAYLOAD_BYTES: optionalInteger(),
+  WORLDCOIN_MAX_ROOT_AGE_MS: integer(86400000, 60000),
+  SEARCH_TIMEOUT_MS: integer(5000),
   REALTIME_MAX_PUBLISH_BATCH: integer(100),
   REALTIME_HEARTBEAT_INTERVAL_MS: integer(15000),
   REALTIME_MAX_BACKLOG: integer(1000),
