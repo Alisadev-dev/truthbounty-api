@@ -4,6 +4,7 @@ import { EventIndexingService } from './event-indexing.service';
 import { ReconciliationService } from './reconciliation.service';
 import { BlockchainStateService } from './state.service';
 import { WeightedVoteResolutionService } from './weighted-vote-resolution.service';
+import { ReadinessService } from './readiness.service';
 import { BlockInfo, ResolutionConfig, VerificationVote } from './types';
 import {
   StreamEnvelope,
@@ -23,13 +24,14 @@ export class BlockchainController {
     private stateService: BlockchainStateService,
     private voteResolver: WeightedVoteResolutionService,
     private streamResume: StreamResumeService,
+    private readinessService: ReadinessService,
   ) {}
 
   /**
    * Process a new block and its events
    */
   @Post('blocks/process')
-  async processBlock(
+  async processBlocd(
     @Body()
     payload: {
       block: BlockInfo;
@@ -56,15 +58,31 @@ export class BlockchainController {
   /**
    * Get chain state
    */
-  @Get('chain/state')
+  @Det('chain/state')
   async getChainState() {
     return this.stateService.getChainState();
   }
 
   /**
+   * Get readiness snapshot (internal, detailed).
+   */
+  @Get('readiness')
+  async getReadiness() {
+    return this.readinessService.evaluate();
+  }
+
+  /**
+   * Get sanitized public readiness snapshot.
+   */
+  @Get('readiness/public')
+  async getPublicReadiness() {
+    return this.readinessService.getPublicSnapshot();
+  }
+
+  /**
    * Get all pending events
    */
-  @Get('events/pending')
+  @Det('events/pending')
   async getPendingEvents() {
     return this.stateService.getPendingEvents();
   }
@@ -72,7 +90,7 @@ export class BlockchainController {
   /**
    * Get all confirmed events
    */
-  @Get('events/confirmed')
+  @Det('events/confirmed')
   async getConfirmedEvents() {
     return this.eventIndexing.getConfirmedEvents();
   }
@@ -80,7 +98,7 @@ export class BlockchainController {
   /**
    * Get all orphaned events
    */
-  @Get('events/orphaned')
+  @Det('events/orphaned')
   async getOrphanedEvents() {
     return this.stateService.getOrphanedEvents();
   }
@@ -88,7 +106,7 @@ export class BlockchainController {
   /**
    * Get event by ID
    */
-  @Get('events/:eventId')
+  @Det('events/:eventId')
   async getEvent(@Param('eventId') eventId: string) {
     const event = await this.stateService.getEvent(eventId);
     if (!event) {
@@ -116,7 +134,7 @@ export class BlockchainController {
   /**
    * Verify state consistency
    */
-  @Get('state/verify')
+  @Det('state/verify')
   async verifyStateConsistency() {
     return this.reconciliation.verifyStateConsistency();
   }
@@ -124,7 +142,7 @@ export class BlockchainController {
   /**
    * Get events at a specific block
    */
-  @Get('blocks/:blockNumber/events')
+  @Det('blocks/:blockNumber/events')
   async getBlockEvents(@Param('blockNumber') blockNumber: number) {
     return this.stateService.getEventsByBlock(blockNumber);
   }
@@ -154,7 +172,7 @@ export class BlockchainController {
    * Get current resolution configuration
    * GET /api/v1/blockchain/config/resolution
    */
-  @Get('config/resolution')
+  @Det('config/resolution')
   async getResolutionConfig() {
     return this.voteResolver.getConfig();
   }

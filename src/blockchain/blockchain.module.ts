@@ -17,6 +17,8 @@ import { StreamBackfillService } from './stream-backfill.service';
 import { StreamGapDetectorService } from './stream-gap-detector.service';
 import { StreamSessionManagerService } from './stream-session-manager.service';
 import { StreamController } from './stream.controller';
+import { ReadinessService } from './readiness.service';
+import { DependencyProvenanceService } from './dependency-provenance.service';
 
 @Module({
   imports: [
@@ -26,6 +28,8 @@ import { StreamController } from './stream.controller';
   providers: [
     BlockchainIndexerService,
     BlockchainStateService,
+    ReadinessService,
+    DependencyProvenanceService,
     ReorgDetectorService,
     ReconciliationService,
     EventIndexingService,
@@ -41,6 +45,8 @@ import { StreamController } from './stream.controller';
   exports: [
     BlockchainIndexerService,
     BlockchainStateService,
+    ReadinessService,
+    DependencyProvenanceService,
     ReorgDetectorService,
     ReconciliationService,
     EventIndexingService,
