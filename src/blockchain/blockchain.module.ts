@@ -14,6 +14,8 @@ import { DeterministicRpcFailoverService } from './deterministic-rpc-failover.se
 import { LeaderElectionService } from './leader-election.service';
 import { Lease } from './lease.entity';
 import { FencingToken } from './fencing-token.entity';
+import { ReadinessService } from './readiness.service';
+import { DependencyProvenanceService } from './dependency-provenance.service';
 
 @Module({
   imports: [
@@ -23,6 +25,8 @@ import { FencingToken } from './fencing-token.entity';
   providers: [
     BlockchainIndexerService,
     BlockchainStateService,
+    ReadinessService,
+    DependencyProvenanceService,
     ReorgDetectorService,
     ReconciliationService,
     EventIndexingService,
@@ -34,6 +38,8 @@ import { FencingToken } from './fencing-token.entity';
   exports: [
     BlockchainIndexerService,
     BlockchainStateService,
+    ReadinessService,
+    DependencyProvenanceService,
     ReorgDetectorService,
     ReconciliationService,
     EventIndexingService,

@@ -17,6 +17,7 @@ import {
 import { ClaimsCache } from '../cache/claims.cache';
 import { SequentialQueue } from './utils/sequential-queue';
 import { Lease } from './lease.entity';
+import { ReadinessService } from '../readiness/readiness.service';
 
 /**
  * Lease backing store for the singleton indexer job. The lease is held in
@@ -77,6 +78,7 @@ export class BlockchainIndexerService {
     private dataSource: DataSource,
     private stateService: BlockchainStateService,
     private claimsCache: ClaimsCache,
+    private readinessService: ReadinessService,
   ) {}
 
   /**
