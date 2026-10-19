@@ -1,7 +1,5 @@
 # TruthBounty API Documentation
 
-## Overview
-
 This document provides a comprehensive reference for all API endpoints in the TruthBounty API. TruthBounty is a decentralized news verification infrastructure that allows users to submit claims, provide evidence, resolve disputes, and earn rewards.
 
 ## Base URL
@@ -49,7 +47,7 @@ Manage claims and their evidence.
 
 **Path Parameters:**
 - `:wallet` - Wallet address
-- `:id` - Claim ID
+-  `:id` - Claim ID
 - `:claimId` - Claim ID
 - `:evidenceId` - Evidence ID
 
@@ -189,7 +187,7 @@ Worldcoin ID verification.
 
 **Path Parameters:**
 - `:userId` - User ID
-- `:nullifierHash` - Nullifier hash
+-  `:nullifierHash` - Nullifier hash
 
 **Request Body (POST /identity/worldcoin/verify):**
 ```json
@@ -397,6 +395,53 @@ Audit log retrieval.
 
 ---
 
+### Inbound Webhooks
+
+Signed inbound webhook delivery from external providers. All requests are verified before any state is committed.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/webhooks/:provider` | Receive a signed webhook delivery from a provider |
+
+**Path Parameters:**
+- `:provider` - Provider identifier. Unknown providers fail closed with `404`.
+
+**Request Headers:**
+- `Content-Type: application/json`
+-  `<provider-signature-header>` - Provider-specific signature header (see below)
+- `<provider-timestamp-header>` - Provider-specific timestamp header (see below)
+- `<provider-delivery-id-header>` - Provider-specific delivery ID header (see below)
+
+**Signed bytes and headers by provider:**
+
+| Provider | Signature header | Timestamp header | Delivery ID header | Signed bytes | Algorithm |
+|----------|------------------|------------------|------------------|--------------|----------|
+| `stellar` | `Stellar-Signature` | `Stellar-Timestamp` | `Stellar-Delivery-ID` | `<timestamp>.<raw-body-bytes>` | HMAC-SHA256 |
+| `coinbase` | `CB-Signature` | `CB-Timestamp` | `CB-Delivery-ID` | `<timestamp>.<raw-body-bytes>` | HMAC-SHA256 |
+| `github` | `X-Hub-Signature-256` | (No timestamp header; timestamp is taken from the signed payload) | `X-GitHub-Delivery` | `<raw-body-bytes>` | HMAC-SHA256 |
+
+**Signature verification rules:**
+- The signature is computed over the exact raw request body bytes as received. The body is not re-serialized, re-ordered, or normalized before verification.
+- Timestamps are validated against a provider-specific tolerance window (default 300 seconds). Deliveries outside the window are rejected with `401`.
+- Signatures are compared using a constant-time comparison. Mismatches are rejected with `401`.
+- Keys are rotated via a key set per provider. Verification succeeds if any active key in the set verifies the signature; keys are identified by a key ID prefix when present.
+-  Delivery IDs are unique per provider. A repeated delivery ID is rejected with `409` and no state change is committed (transactional replay rejection).
+- Request body size is limited to 1 MiB (configurable per provider). Oversized requests are rejected with `413`.
+-  Secrets are never included in responses or logs. Verification failures log only the provider, delivery ID, and a reason code.
+
+**Responses:**
+
+| Status | Description |
+|--------|-------------|
+| `200` | Delivery accepted and processed |
+| `400` | Malformed headers or payload |
+| `401` | Invalid signature, body mutation, or timestamp outside tolerance window |
+| `404` | Unknown provider (fails closed) |
+| `409` | Duplicate delivery ID (replay) |
+| `413` | Request body exceeds size limit |
+
+---
+
 ## Data Types
 
 ### DisputeStatus
@@ -525,3 +570,5 @@ Clients MAY retry any error with `retryable: true` using the same request body a
 ### State Transition Authority
 
 State transitions are derived exclusively from canonical contracts and finalized events. Client-supplied phase or state values are ignored for authority purposes and are only used for conflict detection.
+
+---
