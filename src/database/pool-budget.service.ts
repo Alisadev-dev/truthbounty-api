@@ -11,6 +11,7 @@ import {
   Workload,
   WORKLOADS,
 } from './pool.config';
+import { getRuntimeEnvironment } from '../config/runtime-config';
 
 /**
  * Minimal, dependency-free sink used to report budget events into the
@@ -133,7 +134,7 @@ export class PoolBudgetService implements OnModuleInit, OnModuleDestroy {
   private metricsSink: PoolMetricsSink | null = null;
 
   constructor() {
-    this.config = buildPoolConfig(process.env, this.logger);
+    this.config = buildPoolConfig(getRuntimeEnvironment(), this.logger);
     this.resetCounters();
   }
 

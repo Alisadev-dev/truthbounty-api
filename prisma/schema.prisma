@@ -607,7 +607,9 @@ model WebhookProviderConfig {
   // JSON array of opaque secret refs retained for rotation grace windows.
   rotatedSecretRefs String @default("[]")
 
-  deliveries WebhookDelivery[]
+  // Deliveries are intentionally not a Prisma relation: WebhookDelivery.provider
+  // is a denormalized audit key (see that model), and runtime persistence goes
+  // through TypeORM. A one-sided relation here fails prisma generate (P1012).
 
   @@index([isActive])
 }

@@ -65,9 +65,9 @@ function buildOptions(): DataSourceOptions {
       // statement timeout, idle-in-transaction timeout).
       extra: {
         // Retry strategy (non-pg pool keys retained for compatibility)
-        maxRetries: parseInt(process.env.DB_POOL_RETRIES ?? '3', 10),
-        retryDelay: parseInt(process.env.DB_POOL_RETRY_DELAY ?? '1000', 10),
-        ...buildPoolExtra(buildPoolConfig(process.env)),
+        maxRetries: Number.parseInt(env.DB_POOL_RETRIES ?? '3', 10),
+        retryDelay: Number.parseInt(env.DB_POOL_RETRY_DELAY ?? '1000', 10),
+        ...buildPoolExtra(buildPoolConfig(env)),
       },
     };
   }

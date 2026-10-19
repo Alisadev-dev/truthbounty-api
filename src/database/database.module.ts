@@ -92,7 +92,7 @@ import { MetricsService } from '../metrics/metrics.service';
       inject: [ConfigService],
       useFactory: (configService: ConfigService) => {
         const logger = new Logger('DatabaseModule');
-        const poolConfig = buildPoolConfig(process.env, logger);
+        const poolConfig = buildPoolConfig(getRuntimeEnvironment(), logger);
         const poolExtra = buildPoolExtra(poolConfig);
 
         const databaseUrl = configService.get<string>('DATABASE_URL');

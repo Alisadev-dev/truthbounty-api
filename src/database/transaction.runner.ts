@@ -81,7 +81,7 @@ export class TransactionRunner {
     @InjectDataSource()
     private readonly dataSource: DataSource,
   ) {
-    this.poolConfig = buildPoolConfig(process.env);
+    this.poolConfig = buildPoolConfig(getRuntimeEnvironment());
   }
 
   /**
