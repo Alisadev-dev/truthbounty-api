@@ -5,6 +5,7 @@ import {
   OnModuleInit,
 } from '@nestjs/common';
 import { RedisService } from '../redis/redis.service';
+import { GracefulShutdownService } from '../common/lifecycle/graceful-shutdown.service';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Stake } from '../staking/entities/stake.entity';
@@ -61,6 +62,7 @@ export class JobsService implements OnModuleInit, OnModuleDestroy {
 
   constructor(
     private readonly redisService: RedisService,
+    private readonly gracefulShutdown: GracefulShutdownService,
     @InjectRepository(Stake)
     private readonly stakeRepo: Repository<Stake>,
     @InjectRepository(Wallet)
@@ -100,6 +102,13 @@ export class JobsService implements OnModuleInit, OnModuleDestroy {
     options: JobOptions = {},
     queueName: QueueName = QueueName.DEFAULT,
   ): Promise<Job<T> | null> {
+    if (this.gracefulShutdown.isDraining) {
+      this.logger.warn(
+        `Rejected job ${name}; application shutdown is draining`,
+      );
+      return null;
+    }
+
     const queue = this.getQueue(queueName);
     if (!queue) {
       this.logger.error(`Queue ${queueName} not found`);
@@ -114,15 +123,19 @@ export class JobsService implements OnModuleInit, OnModuleDestroy {
     const jitterRatio = DEFAULT_RETRY_POLICY.jitterRatio ?? 0.3;
 
     try {
-      const job = await queue.add(name, data, {
-        priority,
-        delay: options.delay,
-        attempts,
-        backoff: {
-          type: 'exponential',
-          delay: backoffDelay,
-        },
-      });
+      const job = await this.gracefulShutdown.runTracked(
+        `enqueue:${name}`,
+        () =>
+          queue.add(name, data, {
+            priority,
+            delay: options.delay,
+            attempts,
+            backoff: {
+              type: 'exponential',
+              delay: backoffDelay,
+            },
+          }),
+      );
       this.logger.log(`Enqueued job ${name} (id: ${job.id}) on ${queueName}`);
       return job as Job<T>;
     } catch (error) {
@@ -141,6 +154,12 @@ export class JobsService implements OnModuleInit, OnModuleDestroy {
     cron: string,
     queueName: QueueName = QueueName.DEFAULT,
   ): Promise<Job<T> | null> {
+    if (this.gracefulShutdown.isDraining) {
+      this.logger.warn(
+        `Rejected recurring job ${name}; application is draining`,
+      );
+      return null;
+    }
     const queue = this.getQueue(queueName);
     if (!queue) return null;
 
@@ -169,17 +188,26 @@ export class JobsService implements OnModuleInit, OnModuleDestroy {
 
   @Cron('0 */1 * * *')
   async runHourlyMaintenance(): Promise<void> {
+    if (this.gracefulShutdown.isDraining) return;
     this.logger.log('Hourly maintenance cron triggered');
     // Only run cleanup jobs - compute scores/reputation removed in V2
     // (no backend-authoritative claim finalization allowed)
-    await this.enqueue(
-      JobName.CLEANUP_SYBIL_HISTORY,
-      {},
-      { priority: JobPriority.NORMAL },
+    await this.gracefulShutdown.runTracked('jobs-hourly-maintenance', () =>
+      this.enqueue(
+        JobName.CLEANUP_SYBIL_HISTORY,
+        {},
+        { priority: JobPriority.NORMAL },
+      ),
     );
   }
 
   async retryFailed(queueName: QueueName): Promise<number> {
+    if (this.gracefulShutdown.isDraining) {
+      this.logger.warn(
+        `Rejected retry request for ${queueName}; application is draining`,
+      );
+      return 0;
+    }
     const queue = this.getQueue(queueName);
     if (!queue) return 0;
 
