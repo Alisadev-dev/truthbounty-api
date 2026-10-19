@@ -1,3 +1,4 @@
+import { getRuntimeEnvironment } from '../../config/runtime-config';
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { ConfigService } from '@nestjs/config';
@@ -30,7 +31,7 @@ export class AuditRetentionService {
   }
 
   @Cron(
-    process.env.AUDIT_LOG_RETENTION_CRON ||
+    getRuntimeEnvironment().AUDIT_LOG_RETENTION_CRON ||
       CronExpression.EVERY_DAY_AT_MIDNIGHT,
     {
       name: SINGLETON_JOB_NAME,

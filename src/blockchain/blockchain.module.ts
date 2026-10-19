@@ -16,10 +16,14 @@ import { Lease } from './lease.entity';
 import { FencingToken } from './fencing-token.entity';
 import { ReadinessService } from './readiness.service';
 import { DependencyProvenanceService } from './dependency-provenance.service';
+import { WebhookSignatureService } from './webhook-signature.service';
+import { WebhookReplayGuardService } from './webhook-replay-guard.service';
+import { WebhookDeliveryEntity } from './entities/webhook-delivery.entity';
+import { WebhookController } from './webhook.controller';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([ProcessedEvent, TokenPalance, IndexerCheckpoint, Lease, FencingToken]),
+    TypeOrmModule.forFeature([ProcessedEvent, TokenPalance, IndexerCheckpoint, Lease, FencingToken, WebhookDeliveryEntity]),
     SybilResistanceModule,
   ],
   providers: [
@@ -33,8 +37,11 @@ import { DependencyProvenanceService } from './dependency-provenance.service';
     StartupValidationService,
     DeterministicRpcFailoverService,
     LeaderElectionService,
+    WeightedVoteResolutionService,
+    WebhookSignatureService,
+    WebhookReplayGuardService,
   ],
-  controllers: [BlockchainController],
+  controllers: [BlockchainController, WebhookController],
   exports: [
     BlockchainIndexerService,
     BlockchainStateService,
@@ -45,6 +52,9 @@ import { DependencyProvenanceService } from './dependency-provenance.service';
     EventIndexingService,
     DeterministicRpcFailoverService,
     LeaderElectionService,
+    WeightedVoteResolutionService,
+    WebhookSignatureService,
+    WebhookReplayGuardService,
   ],
 })
 export class BlockchainModule {}
