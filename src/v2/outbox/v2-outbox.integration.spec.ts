@@ -6,6 +6,7 @@ import { V2OutboxService } from './v2-outbox.service';
 import { V2OutboxWorker, V2_OUTBOX_JOB_NAME, V2_OUTBOX_QUEUE_NAME } from './v2-outbox.worker';
 import { V2OutboxMessage, V2OutboxStatus } from './entities/v2-outbox-message.entity';
 import { MetricsService } from '../../metrics/metrics.service';
+import { GracefulShutdownService } from '../../common/lifecycle/graceful-shutdown.service';
 
 /**
  * V2OutboxMessage integration tests (V2-BE-113).
@@ -61,6 +62,13 @@ describe('V2Outbox integration (sqlite in-memory)', () => {
         V2OutboxService,
         V2OutboxWorker,
         { provide: MetricsService, useValue: metricsStub },
+        {
+          provide: GracefulShutdownService,
+          useValue: {
+            isDraining: false,
+            runTracked: jest.fn((_name, operation) => operation()),
+          },
+        },
         // Inject the mock queue under the canonical BullMQ injection token
         {
           provide: getQueueToken(V2_OUTBOX_QUEUE_NAME),
@@ -694,6 +702,7 @@ describe('V2Outbox integration (sqlite in-memory)', () => {
         dataSource,
         mockQueue as any,
         metricsStub as any,
+        new GracefulShutdownService(),
       );
 
       // Seed 5 pending messages
