@@ -8,6 +8,11 @@ import {
   ReleaseManifestContract,
   ReleaseManifestAdapter,
 } from '../config/release-manifest.adapter';
+import {
+  RealtimeConfig,
+  RealtimeTopicDefinition,
+} from './types';
+import { RealtimeConfigService } from './realtime-config.service';
 
 /**
  * Result of validating a single contract config at startup.
@@ -96,6 +101,16 @@ export interface CursorAdvanceRequest {
 }
 
 /**
+ * Result of validating the realtime configuration at startup.
+ */
+export interface RealtimeConfigValidationResult {
+  valid: boolean;
+  errors: string[];
+  topics: RealtimeTopicDefinition[];
+  config?: RealtimeConfig;
+}
+
+/**
  * Readiness status separated from liveness and startup.
  */
 export type ReadinessStatus =
@@ -181,6 +196,12 @@ export interface ReadinessPolicy {
  * stale writers are rejected, hash disagreement fails closed, and rollbacks
  * are separately authorized and audited.
  *
+ * PREWAVE-BE-035 extends this to validate the realtime configuration
+ * (stream origins, topics, retention, heartbeat, payload limits, supported
+ * release) and to authorize subscription topics per principal/capability.
+ * Invalid realtime config fails startup/readiness and topic names cannot
+ * inject Redis/WebSocket patterns.
+ *
  * PREWAVE-BE-044 extends this with runtime readiness observations: observed
  * time, last success, chain head/finalized block, projection lag,
  * release and per-dependency provenance. Liveness, startup, readiness and
@@ -231,6 +252,7 @@ export class StartupValidationService {
   constructor(
     private readonly configService: ConfigService,
     private readonly releaseManifestAdapter: ReleaseManifestAdapter,
+    private readonly realtimeConfigService: RealtimeConfigService,
   ) {}
 
   /**
@@ -273,7 +295,11 @@ export class StartupValidationService {
       errors.push(...this.validateManifestConsistency(envManifest, contracts));
     }
 
-    // 4. Network-backed checks.
+    // 4. Realtime configuration validation (fail-closed outside local).
+    const realtimeResult = this.validateRealtimeConfig(isLocal);
+    errors.push(...realtimeResult.errors);
+
+    // 5. Network-backed checks.
     if (this.configService.get('BLOCKCHAIN_STARTUP_RPC_CHECK') !== 'false') {
       errors.push(...(await this.validateChainAndCode(contracts)));
     }
@@ -289,7 +315,7 @@ export class StartupValidationService {
     this.startupCompletedAt = Date.now();
     const releaseId = envManifest?.releaseId ?? 'unknown';
     this.logger.log(
-      `Blockchain startup validation passed (release=${releaseId}, ${contracts.length} contracts, ABI/address checks ok)`,
+      `Blockchain startup validation passed (release=${releaseId}, ${contracts.length} contracts, ABI/address checks ok, ${realtimeResult.topics.length} realtime topics)`,
     );
   }
 
@@ -408,10 +434,24 @@ export class StartupValidationService {
   }
 
   /**
-   * Validate that the release manifest and the configured contracts agree
-   * on chain ID, release ID, deployment block, addresses and artifact checksums.
+   * Validate realtime configuration (stream origins, topics, retention,
+   * heartbeat, payload limits, supported release). Fails closed outside
+   * local mode.
    */
-  validateManifestConsistency(
+  validateRealtimeConfig(isLocal: boolean): RealtimeConfigValidationResult {
+    const result = this.realtimeConfigService.validate({ isLocal });
+    return {
+      valid: result.valid,
+      errors: result.errors,
+      topics: result.config?.topics ?? [],
+      config: result.config,
+    };
+  }
+
+  /**
+   * Validate release manifest <-> contract config consistency.
+   */
+  private validateManifestConsistency(
     manifest: CanonicalReleaseManifest,
     contracts: ContractConfig[],
   ): string[] {
@@ -443,7 +483,6 @@ export class StartupValidationService {
         );
       }
     }
-
     return errors;
   }
 
