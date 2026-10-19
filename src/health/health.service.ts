@@ -10,6 +10,7 @@ import { BlockchainStateService } from '../blockchain/state.service';
 import { MetricsService } from '../metrics/metrics.service';
 import { DatabaseReadinessService } from '../database/database-readiness.service';
 import { FinalizedCursorService } from '../indexer/finalized-cursor/finalized-cursor.service';
+import { EventQuarantineService } from '../v2/events/event-quarantine.service';
 import { classifyFailure, withTimeout } from './utils/bounded-probe.util';
 import {
   DependencyHealthResult,
@@ -49,7 +50,10 @@ export class HealthService {
   private readonly environment = process.env.NODE_ENV ?? 'development';
   private shuttingDown = false;
 
-  private cachedChecks: { checkedAt: number; result: DependencyStatus[] } | null = null;
+  private cachedChecks: {
+    checkedAt: number;
+    result: DependencyStatus[];
+  } | null = null;
   private inFlightChecks: Promise<DependencyStatus[]> | null = null;
 
   constructor(
@@ -64,6 +68,8 @@ export class HealthService {
     private readonly metricsService: MetricsService,
     @Optional()
     private readonly finalizedCursorService?: FinalizedCursorService,
+    @Optional()
+    private readonly quarantineService?: EventQuarantineService,
   ) {
     this.appVersion = process.env.npm_package_version ?? '0.0.1';
   }
@@ -174,10 +180,19 @@ export class HealthService {
    * check (dedupe); callers within `CHECK_CACHE_TTL_MS` of the last
    * completed pass reuse its result.
    */
-  private async getChecks(): Promise<{ dependencies: DependencyStatus[]; checkedAt: number }> {
+  private async getChecks(): Promise<{
+    dependencies: DependencyStatus[];
+    checkedAt: number;
+  }> {
     const now = Date.now();
-    if (this.cachedChecks && now - this.cachedChecks.checkedAt < CHECK_CACHE_TTL_MS) {
-      return { dependencies: this.cachedChecks.result, checkedAt: this.cachedChecks.checkedAt };
+    if (
+      this.cachedChecks &&
+      now - this.cachedChecks.checkedAt < CHECK_CACHE_TTL_MS
+    ) {
+      return {
+        dependencies: this.cachedChecks.result,
+        checkedAt: this.cachedChecks.checkedAt,
+      };
     }
 
     if (!this.inFlightChecks) {
@@ -242,6 +257,17 @@ export class HealthService {
       });
     }
 
+    // PREWAVE-BE-053 (#647): any OPEN quarantined event blocks readiness.
+    // Replayed rows are resolved and no longer blocking.
+    if (this.quarantineService) {
+      configs.push({
+        name: 'event_quarantine',
+        critical: true,
+        timeoutMs: 2000,
+        check: () => this.checkEventQuarantine(),
+      });
+    }
+
     return Promise.all(
       configs.map(async (config) => {
         const start = Date.now();
@@ -258,7 +284,9 @@ export class HealthService {
           };
         } catch (error) {
           const { reason, reasonCode } = classifyFailure(error);
-          this.logger.warn(`Health check failed for ${config.name} [${reasonCode}]: ${reason}`);
+          this.logger.warn(
+            `Health check failed for ${config.name} [${reasonCode}]: ${reason}`,
+          );
           return {
             name: config.name,
             // Fail closed: any probe that errors or times out is treated as
@@ -332,7 +360,9 @@ export class HealthService {
     // observed a head/finalized cursor.
     const health = await this.blockchainStateService.getIndexerHealth();
     if (health.status === 'unhealthy') {
-      throw new Error('Indexer health is unavailable: missing head/finality cursors');
+      throw new Error(
+        'Indexer health is unavailable: missing head/finality cursors',
+      );
     }
     if (health.status === 'degraded') {
       throw new Error('Indexer health is degraded beyond alert thresholds');
@@ -346,6 +376,18 @@ export class HealthService {
       throw new Error(
         `Finalized cursor not ready: ${(status?.reasons ?? ['CURSOR_MISSING']).join(',')}`,
       );
+    }
+  }
+
+  /**
+   * Fail readiness while any quarantined event is still `open`. Only an
+   * aggregate count is surfaced: this endpoint is public, so no tx hashes,
+   * addresses, topics or payload detail may leak.
+   */
+  private async checkEventQuarantine(): Promise<void> {
+    const blocking = await this.quarantineService!.getBlockingCount();
+    if (blocking > 0) {
+      throw new Error(`EVENT_QUARANTINE_OPEN_COUNT:${blocking}`);
     }
   }
 
