@@ -1,3 +1,4 @@
+import { getRuntimeEnvironment } from '../../config/runtime-config';
 export const PUBLIC_INCIDENT_OPTIONS = Symbol('PUBLIC_INCIDENT_OPTIONS');
 
 export interface PublicIncidentOptions {
@@ -24,7 +25,7 @@ function positiveInt(
 }
 
 export function loadPublicIncidentOptions(
-  env: NodeJS.ProcessEnv = process.env,
+  env: NodeJS.ProcessEnv = getRuntimeEnvironment(),
 ): PublicIncidentOptions {
   return {
     cacheTtlSeconds: positiveInt(

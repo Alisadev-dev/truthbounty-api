@@ -1,3 +1,4 @@
+import { getRuntimeEnvironment } from '../config/runtime-config';
 import {
   Injectable,
   Logger,
@@ -133,7 +134,7 @@ export class PoolBudgetService implements OnModuleInit, OnModuleDestroy {
   private metricsSink: PoolMetricsSink | null = null;
 
   constructor() {
-    this.config = buildPoolConfig(process.env, this.logger);
+    this.config = buildPoolConfig(getRuntimeEnvironment(), this.logger);
     this.resetCounters();
   }
 

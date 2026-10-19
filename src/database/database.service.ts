@@ -1,3 +1,4 @@
+import { getRuntimeEnvironment } from '../config/runtime-config';
 import {
   Injectable,
   Logger,
@@ -264,7 +265,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
    * all counts are zero.
    */
   getBoundedPoolMetrics(): BoundedPoolMetrics {
-    const poolConfig: PoolConfig = buildPoolConfig(process.env);
+    const poolConfig: PoolConfig = buildPoolConfig(getRuntimeEnvironment());
     const max = poolConfig.poolMax;
 
     const unavailable: BoundedPoolMetrics = {

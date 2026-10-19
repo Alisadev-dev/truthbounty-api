@@ -1,3 +1,4 @@
+import { getRuntimeEnvironment } from '../../config/runtime-config';
 /*
  * Opaque pagination cursors (PREWAVE-BE-040).
  *
@@ -116,20 +117,23 @@ export class CursorService {
       throw new Error('CursorService: active signing key is required');
     }
     this.activeKey = resolved.activeKey;
-    this.previousKeys = (resolved.previousKeys ?? []).slice(0, CURSOR_MAX_PREVIOUS_KEYS);
+    this.previousKeys = (resolved.previousKeys ?? []).slice(
+      0,
+      CURSOR_MAX_PREVIOUS_KEYS,
+    );
     this.ttdSeconds = resolved.ttlSeconds ?? CURSOR_DEFAULT_TTL_SECONDS;
     this.nowFns = resolved.nowFns ?? (() => Date.now());
   }
 
   private static resolveOptionsFromEnv(): CursorServiceOptions {
-    const activeId = process.env.CURSOR_KEY_ID;
-    const activeSecret = process.env.CURSOR_KEY_SECRET;
+    const activeId = getRuntimeEnvironment().CURSOR_KEY_ID;
+    const activeSecret = getRuntimeEnvironment().CURSOR_KEY_SECRET;
     if (!activeId || !activeSecret) {
       throw new Error(
         'CursorService: CURSOR_KEY_ID and CURSOR_KEY_SECRET must be set',
       );
     }
-    const previousRaw = process.env.CURSOR_PREVIOUS_KEYS;
+    const previousRaw = getRuntimeEnvironment().CURSOR_PREVIOUS_KEYS;
     const previousKeys: CursorKey[] = [];
     if (previousRaw) {
       for (const entry of previousRaw.split(',')) {
@@ -144,7 +148,7 @@ export class CursorService {
         });
       }
     }
-    const ttlRaw = process.env.CURSOR_TTL_SECONDS;
+    const ttlRaw = getRuntimeEnvironment().CURSOR_TTL_SECONDS;
     const ttlSeconds = ttlRaw ? Number(ttlRaw) : CURSOR_DEFAULT_TTL_SECONDS;
     return {
       activeKey: { id: activeId, secret: activeSecret },
@@ -174,7 +178,9 @@ export class CursorService {
       exp: expiresAt,
       iat: now,
     };
-    const payload = Buffer.from(JSON.stringify(envelope), 'utf8').toString('base64url');
+    const payload = Buffer.from(JSON.stringify(envelope), 'utf8').toString(
+      'base64url',
+    );
     const sig = this.sign(payload, this.activeKey);
     const cursor = `${payload}.${sig}`;
     if (cursor.length > CURSOR_MAX_ENCODED_LENGTH) {

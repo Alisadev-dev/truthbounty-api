@@ -1,3 +1,4 @@
+import { getRuntimeEnvironment } from '../config/runtime-config';
 // Type-only import: `Logger` is only used as an optional parameter type, so
 // this module carries no runtime dependency on NestJS and stays loadable from
 // the standalone TypeORM CLI (`data-source.ts`).
@@ -110,7 +111,7 @@ function readInt(
  * contains only finite integers and no connection secrets.
  */
 export function buildPoolConfig(
-  env: NodeJS.ProcessEnv = process.env,
+  env: NodeJS.ProcessEnv = getRuntimeEnvironment(),
   logger?: Logger,
 ): PoolConfig {
   const poolMax = readInt(

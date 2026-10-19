@@ -1,3 +1,4 @@
+import { getRuntimeEnvironment } from '../config/runtime-config';
 import {
   Module,
   Global,
@@ -91,7 +92,7 @@ import { MetricsService } from '../metrics/metrics.service';
       inject: [ConfigService],
       useFactory: (configService: ConfigService) => {
         const logger = new Logger('DatabaseModule');
-        const poolConfig = buildPoolConfig(process.env, logger);
+        const poolConfig = buildPoolConfig(getRuntimeEnvironment(), logger);
         const poolExtra = buildPoolExtra(poolConfig);
 
         const databaseUrl = configService.get<string>('DATABASE_URL');
@@ -110,7 +111,11 @@ import { MetricsService } from '../metrics/metrics.service';
             logging: configService.get<string>('DATABASE_LOGGING') === 'true',
             ssl:
               configService.get<string>('DB_SSL') === 'true'
-                ? { rejectUnauthorized: false }
+                ? {
+                    rejectUnauthorized:
+                      configService.get('DATABASE_SSL_REJECT_UNAUTHORIZED') !==
+                      'false',
+                  }
                 : false,
             extra: poolExtra,
           };
@@ -142,7 +147,13 @@ import { MetricsService } from '../metrics/metrics.service';
             configService.get<string>('NODE_ENV') !== 'production' &&
             configService.get<string>('DATABASE_SYNCHRONIZE') === 'true',
           logging: configService.get<string>('DATABASE_LOGGING') === 'true',
-          ssl: ssl ? { rejectUnauthorized: false } : false,
+          ssl: ssl
+            ? {
+                rejectUnauthorized:
+                  configService.get('DATABASE_SSL_REJECT_UNAUTHORIZED') !==
+                  'false',
+              }
+            : false,
           extra: poolExtra,
         };
       },

@@ -1,3 +1,4 @@
+import { getRuntimeEnvironment } from '../../config/runtime-config';
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { PublicIncidentProjectionEntity } from './entities/public-incident-projection.entity';
@@ -17,7 +18,7 @@ import {
     PublicIncidentRateLimitGuard,
     {
       provide: PUBLIC_INCIDENT_OPTIONS,
-      useFactory: () => loadPublicIncidentOptions(process.env),
+      useFactory: () => loadPublicIncidentOptions(getRuntimeEnvironment()),
     },
   ],
   exports: [PublicIncidentService, TypeOrmModule],

@@ -1,3 +1,4 @@
+import { getRuntimeEnvironment } from '../config/runtime-config';
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, EntityManager, QueryRunner } from 'typeorm';
@@ -80,7 +81,7 @@ export class TransactionRunner {
     @InjectDataSource()
     private readonly dataSource: DataSource,
   ) {
-    this.poolConfig = buildPoolConfig(process.env);
+    this.poolConfig = buildPoolConfig(getRuntimeEnvironment());
   }
 
   /**

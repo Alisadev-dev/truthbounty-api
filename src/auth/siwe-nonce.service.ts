@@ -1,3 +1,4 @@
+import { getRuntimeEnvironment } from '../config/runtime-config';
 // src/auth/siwe-nonce.service.ts
 import {
   Injectable,
@@ -23,18 +24,20 @@ import { generateNonce } from 'siwe';
 @Injectable()
 export class SiweNonceService {
   private readonly logger = new Logger(SiweNonceService.name);
-  private readonly domain = process.env.SIWE_DOMAIN || 'truthbounty.app';
+  private readonly domain =
+    getRuntimeEnvironment().SIWE_DOMAIN || 'truthbounty.app';
   private readonly nonceExpiryMinutes = 5;
   private readonly allowedOrigins: string[];
   private readonly supportedChainIds: number[];
 
   constructor(private readonly dataSource: DataSource) {
-    this.allowedOrigins = (process.env.SIWE_ALLOWED_ORIGINS || '')
+    this.allowedOrigins = (getRuntimeEnvironment().SIWE_ALLOWED_ORIGINS || '')
       .split(',')
       .map((s) => s.trim())
       .filter(Boolean);
 
-    const rawChainIds = process.env.SIWE_SUPPORTED_CHAIN_IDS || '10,11155420';
+    const rawChainIds =
+      getRuntimeEnvironment().SIWE_SUPPORTED_CHAIN_IDS || '10,11155420';
     this.supportedChainIds = rawChainIds
       .split(',')
       .map((s) => Number.parseInt(s.trim(), 10))
@@ -81,8 +84,7 @@ export class SiweNonceService {
 
       // 3. Construct exact canonical EIP-4361 message format
       const issuedAt = new Date().toISOString();
-      const statement =
-        'Sign in to TruthBounty V2 to verify wallet ownership.';
+      const statement = 'Sign in to TruthBounty V2 to verify wallet ownership.';
 
       const siweMessage = [
         `${this.domain} wants you to sign in with your Ethereum account:`,

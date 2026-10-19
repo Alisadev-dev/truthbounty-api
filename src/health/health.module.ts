@@ -1,3 +1,4 @@
+import { getRuntimeEnvironment } from '../config/runtime-config';
 import { Module } from '@nestjs/common';
 import { RedisModule } from '../redis/redis.module';
 import { HealthService } from './health.service';
@@ -38,7 +39,7 @@ import { PublicIncidentsModule } from './public-incidents/public-incidents.modul
     PublicStatusRateLimitGuard,
     {
       provide: PUBLIC_STATUS_OPTIONS,
-      useFactory: () => loadPublicStatusOptions(process.env),
+      useFactory: () => loadPublicStatusOptions(getRuntimeEnvironment()),
     },
   ],
   controllers: [HealthController, PublicStatusController],

@@ -53,6 +53,12 @@ jobs:
       - name: Verify toolchain and compiler parity
         run: npm run parity:check
 
+      - name: Runtime configuration documentation drift
+        run: npm run config:check
+
+      - name: Runtime configuration regression tests
+        run: npm test -- --runInBand src/config/runtime-config.spec.ts src/config/runtime-drift.spec.ts src/config/runtime-nest.spec.ts
+
       - name: Type check
         run: npm run type-check
 
