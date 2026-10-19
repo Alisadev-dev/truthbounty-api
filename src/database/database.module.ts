@@ -1,3 +1,4 @@
+import { getRuntimeEnvironment } from '../config/runtime-config';
 import {
   Module,
   Global,
@@ -110,7 +111,11 @@ import { MetricsService } from '../metrics/metrics.service';
             logging: configService.get<string>('DATABASE_LOGGING') === 'true',
             ssl:
               configService.get<string>('DB_SSL') === 'true'
-                ? { rejectUnauthorized: false }
+                ? {
+                    rejectUnauthorized:
+                      configService.get('DATABASE_SSL_REJECT_UNAUTHORIZED') !==
+                      'false',
+                  }
                 : false,
             extra: poolExtra,
           };
