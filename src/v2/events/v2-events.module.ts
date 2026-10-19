@@ -9,10 +9,15 @@ import { EventDecoderService } from './event-decoder.service';
 import { CanonicalEventsService } from './canonical-events.service';
 import { CanonicalEventQueryService } from './canonical-event-query.service';
 import { IndexerConfigService } from '../../config/indexer-config.service';
+import { ProjectorCursor } from '../common/entities/projector-cursor.entity';
 
 import { ReorgRollbackService } from './reorg-rollback.service';
 import { ReorgRecoveryService } from './reorg-recovery.service';
 import { ReorgJournalEntry } from './entities/reorg-journal.entity';
+import { EventQuarantineService } from './event-quarantine.service';
+import { EventQuarantineReplayService } from './event-quarantine-replay.service';
+import { EventQuarantineRetentionService } from './event-quarantine-retention.service';
+import { EventQuarantineController } from './event-quarantine.controller';
 
 @Module({
   imports: [
@@ -22,8 +27,10 @@ import { ReorgJournalEntry } from './entities/reorg-journal.entity';
       EventQuarantine,
       EventCheckpoint,
       ReorgJournalEntry,
+      ProjectorCursor,
     ]),
   ],
+  controllers: [EventQuarantineController],
   providers: [
     ArtifactRegistryService,
     EventDecoderService,
@@ -32,6 +39,9 @@ import { ReorgJournalEntry } from './entities/reorg-journal.entity';
     ReorgRollbackService,
     ReorgRecoveryService,
     IndexerConfigService,
+    EventQuarantineService,
+    EventQuarantineReplayService,
+    EventQuarantineRetentionService,
   ],
   exports: [
     CanonicalEventsService,
@@ -39,6 +49,8 @@ import { ReorgJournalEntry } from './entities/reorg-journal.entity';
     ArtifactRegistryService,
     ReorgRollbackService,
     ReorgRecoveryService,
+    EventQuarantineService,
+    EventQuarantineReplayService,
     TypeOrmModule,
   ],
 })
