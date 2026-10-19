@@ -19,10 +19,14 @@ import { StreamSessionManagerService } from './stream-session-manager.service';
 import { StreamController } from './stream.controller';
 import { ReadinessService } from './readiness.service';
 import { DependencyProvenanceService } from './dependency-provenance.service';
+import { WebhookSignatureService } from './webhook-signature.service';
+import { WebhookReplayGuardService } from './webhook-replay-guard.service';
+import { WebhookDeliveryEntity } from './entities/webhook-delivery.entity';
+import { WebhookController } from './webhook.controller';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([ProcessedEvent, TokenBalance, IndexerCheckpoint]),
+    TypeOrmModule.forFeature([ProcessedEvent, TokenBalance, IndexerCheckpoint, WebhookDeliveryEntity]),
     SybilResistanceModule,
   ],
   providers: [
@@ -40,8 +44,11 @@ import { DependencyProvenanceService } from './dependency-provenance.service';
     StreamBackfillService,
     StreamGapDetectorService,
     StreamSessionManagerService,
+    WeightedVoteResolutionService,
+    WebhookSignatureService,
+    WebhookReplayGuardService,
   ],
-  controllers: [BlockchainController, StreamController],
+  controllers: [BlockchainController, StreamController, WebhookController],
   exports: [
     BlockchainIndexerService,
     BlockchainStateService,
@@ -56,6 +63,9 @@ import { DependencyProvenanceService } from './dependency-provenance.service';
     StreamBackfillService,
     StreamGapDetectorService,
     StreamSessionManagerService,
+    WeightedVoteResolutionService,
+    WebhookSignatureService,
+    WebhookReplayGuardService,
   ],
 })
 export class BlockchainModule {}
