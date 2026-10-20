@@ -6,7 +6,7 @@ import { BullBoardModule } from '@bull-board/nestjs';
 import { ExpressAdapter } from '@bull-board/express';
 import { ScheduleModule } from '@nestjs/schedule';
 import { ThrottlerModule } from '@nestjs/throttler';
-import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
+import { APP_GUARD, APP_INTERCEPTOR, DiscoveryModule } from '@nestjs/core';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { RewardsModule } from './rewards/rewards.module';
@@ -65,6 +65,8 @@ import { V2OutboxModule } from './v2/outbox/v2-outbox.module';
 import { CredentialRotationModule } from './security/credential-rotation.module';
 import { OperationsModule } from './operations/operations.module';
 import { WebhooksModule } from './webhooks/webhooks.module';
+import { GracefulShutdownModule } from './common/lifecycle/graceful-shutdown.module';
+import { GracefulShutdownService } from './common/lifecycle/graceful-shutdown.service';
 import { NotificationsModule as OutboundWebhooksNotificationsModule } from './notifications/notifications.module';
 import { AbuseSignalsModule } from './abuse-signals/abuse-signals.module';
 import { AbuseSignalInterceptor } from './abuse-signals/abuse-signal.interceptor';
@@ -167,6 +169,11 @@ class ThrottlerRedisStorage {
   constructor(redis: any) {
     this.redis = redis;
     this.logger.log('Using Redis storage for rate limiting (production mode)');
+  }
+
+  async close(): Promise<void> {
+    await this.redis.quit();
+    this.logger.log('Rate-limit Redis connection closed');
   }
 
   async increment(
@@ -301,6 +308,8 @@ async function createThrottlerStorage(
     }),
     FinalityPolicyModule,
     ScheduleModule.forRoot(),
+    DiscoveryModule,
+    GracefulShutdownModule,
     // Idempotency Module
     // Provides idempotency key handling for safe commands
     IdempotencyModule,
@@ -310,9 +319,17 @@ async function createThrottlerStorage(
     PrismaModule,
     ThrottlerModule.forRootAsync({
       imports: [ConfigModule],
-      inject: [ConfigService],
-      useFactory: async (configService: ConfigService) => {
+      inject: [ConfigService, GracefulShutdownService],
+      useFactory: async (
+        configService: ConfigService,
+        gracefulShutdown: GracefulShutdownService,
+      ) => {
         const storage = await createThrottlerStorage(configService);
+        if (storage instanceof ThrottlerRedisStorage) {
+          gracefulShutdown.registerStopHook('throttler-redis', () =>
+            storage.close(),
+          );
+        }
         return {
           throttlers: [
             {

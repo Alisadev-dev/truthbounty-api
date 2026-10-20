@@ -446,6 +446,7 @@ export const runtimeSchema = {
   AUDIT_LOG_RETENTION_CRON: text(),
   AUDIT_LOG_RETENTION_DAYS: integer(365),
   AUDIT_PII_RETENTION_DAYS: integer(30),
+  EVENT_QUARANTINE_RETENTION_DAYS: integer(90, 1, 3650),
   AUDIT_MAX_BATCH_WAIT_MS: integer(1000),
   AUDIT_METRIC_PREFIX: text({ default: 'audit' }),
   AUDIT_MAX_API_CALLS: integer(100),

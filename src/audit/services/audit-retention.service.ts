@@ -3,6 +3,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { ConfigService } from '@nestjs/config';
 import { AuditTrailService } from './audit-trail.service';
+import { GracefulShutdownService } from '../../common/lifecycle/graceful-shutdown.service';
 
 export interface RetentionExecutionResult {
   purgedLogsCount: number;
@@ -21,6 +22,7 @@ export class AuditRetentionService {
   constructor(
     private readonly auditTrailService: AuditTrailService,
     private readonly configService: ConfigService,
+    private readonly gracefulShutdown: GracefulShutdownService,
   ) {
     this.daysToKeep = this.resolveRetentionDays();
     this.piiDaysToKeep = this.resolvePiiRetentionDays();
@@ -35,26 +37,28 @@ export class AuditRetentionService {
     },
   )
   async enforceRetentionAndPrivacyPolicies(): Promise<RetentionExecutionResult> {
-    this.logger.log(
-      'Starting scheduled data retention and privacy controls execution',
-    );
+    return this.gracefulShutdown.runTracked('audit-retention', async () => {
+      this.logger.log(
+        'Starting scheduled data retention and privacy controls execution',
+      );
 
-    const purgedLogsCount = await this.purgeOldAuditLogs();
-    const scrubbedPiiCount = await this.scrubOldPii();
+      const purgedLogsCount = await this.purgeOldAuditLogs();
+      const scrubbedPiiCount = await this.scrubOldPii();
 
-    const result: RetentionExecutionResult = {
-      purgedLogsCount,
-      scrubbedPiiCount,
-      retentionDays: this.daysToKeep,
-      piiRetentionDays: this.piiDaysToKeep,
-      timestamp: new Date().toISOString(),
-    };
+      const result: RetentionExecutionResult = {
+        purgedLogsCount,
+        scrubbedPiiCount,
+        retentionDays: this.daysToKeep,
+        piiRetentionDays: this.piiDaysToKeep,
+        timestamp: new Date().toISOString(),
+      };
 
-    this.logger.log(
-      `Retention and privacy execution complete: purged ${purgedLogsCount} expired records, scrubbed PII from ${scrubbedPiiCount} records`,
-    );
+      this.logger.log(
+        `Retention and privacy execution complete: purged ${purgedLogsCount} expired records, scrubbed PII from ${scrubbedPiiCount} records`,
+      );
 
-    return result;
+      return result;
+    });
   }
 
   async purgeOldAuditLogs(): Promise<number> {
