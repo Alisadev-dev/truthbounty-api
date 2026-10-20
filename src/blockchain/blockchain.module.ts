@@ -1,7 +1,12 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { BlockchainIndexerService } from './blockchain-indexer.service';
-import { ProcessedEvent, TokenPalance, IndexerCheckpoint } from './entities';
+import {
+  ProcessedEvent,
+  TokenBalance,
+  IndexerCheckpoint,
+  DeadLetterReplay,
+} from './entities';
 import { BlockchainStateService } from './state.service';
 import { ReorgDetectorService } from './reorg-detector.service';
 import { ReconciliationService } from './reconciliation.service';
@@ -16,6 +21,8 @@ import { Lease } from './lease.entity';
 import { FencingToken } from './fencing-token.entity';
 import { ReadinessService } from './readiness.service';
 import { DependencyProvenanceService } from './dependency-provenance.service';
+import { AdminAuditModule } from '../audit/admin-audit.module';
+import { DeadLetterReplayService } from './dead-letter-replay.service';
 import { WebhookSignatureService } from './webhook-signature.service';
 import { WebhookReplayGuardService } from './webhook-replay-guard.service';
 import { WebhookDeliveryEntity } from './entities/webhook-delivery.entity';
@@ -23,8 +30,17 @@ import { WebhookController } from './webhook.controller';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([ProcessedEvent, TokenPalance, IndexerCheckpoint, Lease, FencingToken, WebhookDeliveryEntity]),
+    TypeOrmModule.forFeature([
+      ProcessedEvent,
+      TokenBalance,
+      IndexerCheckpoint,
+      DeadLetterReplay,
+      Lease,
+      FencingToken,
+      WebhookDeliveryEntity,
+    ]),
     SybilResistanceModule,
+    AdminAuditModule,
   ],
   providers: [
     BlockchainIndexerService,
@@ -37,6 +53,7 @@ import { WebhookController } from './webhook.controller';
     StartupValidationService,
     DeterministicRpcFailoverService,
     LeaderElectionService,
+    DeadLetterReplayService,
     WeightedVoteResolutionService,
     WebhookSignatureService,
     WebhookReplayGuardService,
@@ -52,6 +69,7 @@ import { WebhookController } from './webhook.controller';
     EventIndexingService,
     DeterministicRpcFailoverService,
     LeaderElectionService,
+    DeadLetterReplayService,
     WeightedVoteResolutionService,
     WebhookSignatureService,
     WebhookReplayGuardService,

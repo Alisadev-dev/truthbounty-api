@@ -14,6 +14,7 @@ import {
   EventQuarantine,
   QuarantineStatus,
 } from './entities/event-quarantine.entity';
+import { GracefulShutdownService } from '../../common/lifecycle/graceful-shutdown.service';
 
 const DEFAULT_RETENTION_DAYS = 90;
 
@@ -32,13 +33,17 @@ export class EventQuarantineRetentionService {
     @InjectRepository(EventQuarantine)
     private readonly repo: Repository<EventQuarantine>,
     private readonly config: ConfigService,
+    private readonly gracefulShutdown: GracefulShutdownService,
     @Optional() private readonly audit?: AuditTrailService,
   ) {}
 
   @Cron(CronExpression.EVERY_DAY_AT_3AM)
   async scheduledCleanup(): Promise<void> {
+    if (this.gracefulShutdown.isDraining) return;
     try {
-      await this.runRetentionCleanup();
+      await this.gracefulShutdown.runTracked('event-quarantine-retention', () =>
+        this.runRetentionCleanup(),
+      );
     } catch (error) {
       this.logger.error(
         `Scheduled quarantine retention failed: ${error instanceof Error ? error.message : String(error)}`,

@@ -1,8 +1,8 @@
-import { getRuntimeEnvironment } from '../config/runtime-config';
 // Type-only import: `Logger` is only used as an optional parameter type, so
 // this module carries no runtime dependency on NestJS and stays loadable from
 // the standalone TypeORM CLI (`data-source.ts`).
 import type { Logger } from '@nestjs/common';
+import { getRuntimeEnvironment } from '../config/runtime-config';
 
 /**
  * Workload classes that share the database connection pool.

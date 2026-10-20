@@ -8,6 +8,7 @@ import { IndexerConfigService } from '../config';
 import { EventIndexerService } from './event-indexer.service';
 import { IndexerController } from './indexer.controller';
 import { ReorgSafeCursorService } from './reorg-safe-cursor.service';
+import { GracefulShutdownService } from '../common/lifecycle/graceful-shutdown.service';
 
 /**
  * Indexer module — wires EventIndexerService for V2-BE-125.
@@ -30,9 +31,16 @@ import { ReorgSafeCursorService } from './reorg-safe-cursor.service';
   exports: [EventIndexerService, ReorgSafeCursorService],
 })
 export class IndexerModule implements OnModuleInit, OnModuleDestroy {
-  constructor(private readonly eventIndexerService: EventIndexerService) {}
+  constructor(
+    private readonly eventIndexerService: EventIndexerService,
+    private readonly gracefulShutdown: GracefulShutdownService,
+  ) {}
 
   async onModuleInit(): Promise<void> {
+    this.gracefulShutdown.registerStopHook('event-indexer', () =>
+      this.eventIndexerService.stop(),
+    );
+    if (this.gracefulShutdown.isDraining) return;
     try {
       await this.eventIndexerService.start();
     } catch (error) {
@@ -40,7 +48,7 @@ export class IndexerModule implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  onModuleDestroy(): void {
-    this.eventIndexerService.stop();
+  onModuleDestroy(): Promise<void> {
+    return this.eventIndexerService.stop();
   }
 }

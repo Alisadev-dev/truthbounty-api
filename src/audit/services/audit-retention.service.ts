@@ -4,6 +4,7 @@ import { Cron, CronExpression } from '@nestjs/schedule';
 import { ConfigService } from '@nestjs/config';
 import { AuditTrailService } from './audit-trail.service';
 import { LeaseService } from '../../common/lease/lease.service';
+import { GracefulShutdownService } from '../../common/lifecycle/graceful-shutdown.service';
 
 export interface RetentionExecutionResult {
   purgedLogsCount: number;
@@ -25,6 +26,7 @@ export class AuditRetentionService {
     private readonly auditTrailService: AuditTrailService,
     private readonly configService: ConfigService,
     private readonly leaseService: LeaseService,
+    private readonly gracefulShutdown: GracefulShutdownService,
   ) {
     this.daysToKeep = this.resolveRetentionDays();
     this.piiDaysToKeep = this.resolvePiiRetentionDays();
@@ -52,25 +54,27 @@ export class AuditRetentionService {
     );
 
     try {
-      const purgedLogsCount = await this.purgeOldAuditLogs();
-      await this.leaseService.assertLeadership(lease);
+      return await this.gracefulShutdown.runTracked('audit-retention', async () => {
+        const purgedLogsCount = await this.purgeOldAuditLogs();
+        await this.leaseService.assertLeadership(lease);
 
-      const scrubbedPiiCount = await this.scrubOldPii();
-      await this.leaseService.assertLeadership(lease);
+        const scrubbedPiiCount = await this.scrubOldPii();
+        await this.leaseService.assertLeadership(lease);
 
-      const result: RetentionExecutionResult = {
-        purgedLogsCount,
-        scrubbedPiiCount,
-        retentionDays: this.daysToKeep,
-        piiRetentionDays: this.piiDaysToKeep,
-        timestamp: new Date().toISOString(),
-      };
+        const result: RetentionExecutionResult = {
+          purgedLogsCount,
+          scrubbedPiiCount,
+          retentionDays: this.daysToKeep,
+          piiRetentionDays: this.piiDaysToKeep,
+          timestamp: new Date().toISOString(),
+        };
 
-      this.logger.log(
-        `Retention and privacy execution complete: purged ${purgedLogsCount} expired records, scrubbed PII from ${scrubbedPiiCount} records`,
-      );
+        this.logger.log(
+          `Retention and privacy execution complete: purged ${purgedLogsCount} expired records, scrubbed PII from ${scrubbedPiiCount} records`,
+        );
 
-      return result;
+        return result;
+      });
     } catch (error) {
       this.logger.warn(
         `Retention run aborted for ${SINGLETON_JOB_NAME}: ${error instanceof Error ? error.message : String(error)}`,
