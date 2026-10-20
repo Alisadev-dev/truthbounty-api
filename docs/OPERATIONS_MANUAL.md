@@ -176,3 +176,20 @@ The V2 indexer records block hashes and removed logs in PostgreSQL. A block hash
 2. Inspect `v2_indexer_blocks` for rows with `status = 'replaced'` and `v2_removed_logs` for the affected transaction and log index.
 3. After the canonical RPC view is healthy, replay from the last known safe block using the indexer backfill operation.
 4. Verify the replacement block hash and projection version advance monotonically before resuming delivery.
+
+## Graceful application shutdown
+
+Send `SIGTERM` (or `SIGINT`) to request a graceful shutdown. The application
+stops admitting HTTP requests (new requests receive `503` with `Retry-After`),
+stops scheduled polling and BullMQ consumers, drains in-flight HTTP and tracked
+background work, notifies and disconnects websocket clients, then closes Nest
+providers including Redis and database connections.
+
+The shutdown deadline is 30 seconds. A stuck worker or stream is logged with
+the outstanding work count; the process exits with status `1` at the deadline
+or if resource closure fails, and forcibly closes HTTP connections. BullMQ jobs
+interrupted at the deadline remain eligible for redelivery after their lock
+expires, and outbox rows left in `PROCESSING` are recovered through their
+existing processing deadlines.
+Review shutdown completion, timeout, and provider-close log records when
+investigating a deployment termination.

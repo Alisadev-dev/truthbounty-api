@@ -1,11 +1,13 @@
 import { AuditRetentionService } from './audit-retention.service';
 import { AuditTrailService } from './audit-trail.service';
 import { ConfigService } from '@nestjs/config';
+import { GracefulShutdownService } from '../../common/lifecycle/graceful-shutdown.service';
 
 describe('AuditRetentionService', () => {
   let service: AuditRetentionService;
   let auditTrailService: jest.Mocked<AuditTrailService>;
   let configService: jest.Mocked<ConfigService>;
+  let gracefulShutdown: GracefulShutdownService;
 
   beforeEach(() => {
     auditTrailService = {
@@ -17,6 +19,7 @@ describe('AuditRetentionService', () => {
     configService = {
       get: jest.fn(),
     } as unknown as jest.Mocked<ConfigService>;
+    gracefulShutdown = new GracefulShutdownService();
   });
 
   describe('Configuration Defaults and Parsing', () => {
@@ -29,7 +32,11 @@ describe('AuditRetentionService', () => {
       auditTrailService.deleteOldLogs.mockResolvedValue(10);
       auditTrailService.scrubAgedPii.mockResolvedValue(5);
 
-      service = new AuditRetentionService(auditTrailService, configService);
+      service = new AuditRetentionService(
+        auditTrailService,
+        configService,
+        gracefulShutdown,
+      );
 
       const result = await service.enforceRetentionAndPrivacyPolicies();
 
@@ -46,7 +53,11 @@ describe('AuditRetentionService', () => {
       auditTrailService.deleteOldLogs.mockResolvedValue(0);
       auditTrailService.scrubAgedPii.mockResolvedValue(0);
 
-      service = new AuditRetentionService(auditTrailService, configService);
+      service = new AuditRetentionService(
+        auditTrailService,
+        configService,
+        gracefulShutdown,
+      );
 
       const result = await service.enforceRetentionAndPrivacyPolicies();
 
@@ -62,7 +73,11 @@ describe('AuditRetentionService', () => {
       (configService.get as jest.Mock).mockReturnValue(undefined);
       auditTrailService.deleteOldLogs.mockResolvedValue(12);
 
-      service = new AuditRetentionService(auditTrailService, configService);
+      service = new AuditRetentionService(
+        auditTrailService,
+        configService,
+        gracefulShutdown,
+      );
 
       await expect(service.purgeOldAuditLogs()).resolves.toBe(12);
       expect(auditTrailService.deleteOldLogs).toHaveBeenCalledWith(365);
@@ -72,7 +87,11 @@ describe('AuditRetentionService', () => {
       (configService.get as jest.Mock).mockReturnValue(undefined);
       auditTrailService.scrubAgedPii.mockResolvedValue(25);
 
-      service = new AuditRetentionService(auditTrailService, configService);
+      service = new AuditRetentionService(
+        auditTrailService,
+        configService,
+        gracefulShutdown,
+      );
 
       await expect(service.scrubOldPii()).resolves.toBe(25);
       expect(auditTrailService.scrubAgedPii).toHaveBeenCalledWith(30);

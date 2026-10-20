@@ -102,3 +102,43 @@ export type BlockCursorAncestor = Prisma.BlockCursorAncestorModel
  * 
  */
 export type ChainEvent = Prisma.ChainEventModel
+/**
+ * Model FeatureFlag
+ * 
+ */
+export type FeatureFlag = Prisma.FeatureFlagModel
+/**
+ * Model FeatureFlagRollbackTarget
+ * 
+ */
+export type FeatureFlagRollbackTarget = Prisma.FeatureFlagRollbackTargetModel
+/**
+ * Model FeatureFlagAuditEvent
+ * 
+ */
+export type FeatureFlagAuditEvent = Prisma.FeatureFlagAuditEventModel
+/**
+ * Model SupportSubmission
+ * 
+ */
+export type SupportSubmission = Prisma.SupportSubmissionModel
+/**
+ * Model SupportAttachment
+ * 
+ */
+export type SupportAttachment = Prisma.SupportAttachmentModel
+/**
+ * Model QuarantineAuditLog
+ * 
+ */
+export type QuarantineAuditLog = Prisma.QuarantineAuditLogModel
+/**
+ * Model WebhookProviderConfig
+ * 
+ */
+export type WebhookProviderConfig = Prisma.WebhookProviderConfigModel
+/**
+ * Model WebhookDelivery
+ * 
+ */
+export type WebhookDelivery = Prisma.WebhookDeliveryModel

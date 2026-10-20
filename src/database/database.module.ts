@@ -147,13 +147,7 @@ import { MetricsService } from '../metrics/metrics.service';
             configService.get<string>('NODE_ENV') !== 'production' &&
             configService.get<string>('DATABASE_SYNCHRONIZE') === 'true',
           logging: configService.get<string>('DATABASE_LOGGING') === 'true',
-          ssl: ssl
-            ? {
-                rejectUnauthorized:
-                  configService.get('DATABASE_SSL_REJECT_UNAUTHORIZED') !==
-                  'false',
-              }
-            : false,
+          ssl: ssl ? { rejectUnauthorized: false } : false,
           extra: poolExtra,
         };
       },
