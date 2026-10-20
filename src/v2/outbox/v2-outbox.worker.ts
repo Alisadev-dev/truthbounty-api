@@ -4,8 +4,12 @@ import { InjectDataSource } from '@nestjs/typeorm';
 import { InjectQueue } from '@nestjs/bullmq';
 import { DataSource, EntityManager } from 'typeorm';
 import { Queue } from 'bullmq';
-import { V2OutboxMessage, V2OutboxStatus } from './entities/v2-outbox-message.entity';
+import {
+  V2OutboxMessage,
+  V2OutboxStatus,
+} from './entities/v2-outbox-message.entity';
 import { MetricsService } from '../../metrics/metrics.service';
+import { GracefulShutdownService } from '../../common/lifecycle/graceful-shutdown.service';
 import {
   determineRetryBehavior,
   ErrorClassification,
@@ -103,6 +107,7 @@ export class V2OutboxWorker implements OnModuleDestroy {
     @InjectQueue(V2_OUTBOX_QUEUE_NAME)
     private readonly queue: Queue,
     private readonly metricsService: MetricsService,
+    private readonly gracefulShutdown: GracefulShutdownService,
   ) {}
 
   onModuleDestroy(): void {
@@ -113,7 +118,11 @@ export class V2OutboxWorker implements OnModuleDestroy {
 
   @Cron(CronExpression.EVERY_5_SECONDS)
   async handleCron(): Promise<void> {
-    if (this.shuttingDown || this.isPolling) {
+    if (
+      this.shuttingDown ||
+      this.gracefulShutdown.isDraining ||
+      this.isPolling
+    ) {
       this.logger.debug(
         this.shuttingDown
           ? 'Outbox worker shutting down — skipping poll'
@@ -124,9 +133,12 @@ export class V2OutboxWorker implements OnModuleDestroy {
 
     this.isPolling = true;
     try {
-      await this.recoverStuckMessages();
-      await this.pollAndDispatch();
+      await this.gracefulShutdown.runTracked('v2-outbox-poll', async () => {
+        await this.recoverStuckMessages();
+        await this.pollAndDispatch();
+      });
     } catch (err) {
+      if (this.gracefulShutdown.isDraining) return;
       this.logger.error(
         `Outbox poll cycle error: ${(err as Error)?.message ?? err}`,
         (err as Error)?.stack,
@@ -187,7 +199,10 @@ export class V2OutboxWorker implements OnModuleDestroy {
     if (claimed.length === 0) return;
 
     this.logger.debug(`V2OutboxWorker: claimed ${claimed.length} message(s)`);
-    this.metricsService.incrementCounter('v2_outbox_batch_claimed_total', claimed.length);
+    this.metricsService.incrementCounter(
+      'v2_outbox_batch_claimed_total',
+      claimed.length,
+    );
 
     for (const msg of claimed) {
       await this.dispatchOne(msg);
@@ -299,7 +314,9 @@ export class V2OutboxWorker implements OnModuleDestroy {
           // idempotencyKey is a no-op if a job with this id already exists.
           jobId: `outbox-${msg.idempotencyKey}`,
           attempts:
-            retryBehavior.classification === ErrorClassification.NETWORK ? 5 : 3,
+            retryBehavior.classification === ErrorClassification.NETWORK
+              ? 5
+              : 3,
           backoff: {
             type: 'exponential',
             delay: 1000,
@@ -369,7 +386,10 @@ export class V2OutboxWorker implements OnModuleDestroy {
     const exhausted = newRetryCount >= msg.maxRetries;
     const isDead = !retryBehavior.shouldRetry || exhausted;
 
-    const errorText = String(err?.message ?? 'Unknown dispatch error').slice(0, 1000);
+    const errorText = String(err?.message ?? 'Unknown dispatch error').slice(
+      0,
+      1000,
+    );
 
     // Guarded transition: only update if still in PROCESSING state
     await this.dataSource.getRepository(V2OutboxMessage).update(

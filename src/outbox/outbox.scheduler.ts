@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { OutboxService } from './outbox.service';
+import { GracefulShutdownService } from '../common/lifecycle/graceful-shutdown.service';
 
 /**
  * OutboxScheduler — periodic poller for the Transactional Outbox (V2-BE-048).
@@ -14,11 +15,14 @@ export class OutboxScheduler {
   private readonly logger = new Logger(OutboxScheduler.name);
   private isProcessing = false;
 
-  constructor(private readonly outboxService: OutboxService) {}
+  constructor(
+    private readonly outboxService: OutboxService,
+    private readonly gracefulShutdown: GracefulShutdownService,
+  ) {}
 
   @Cron(CronExpression.EVERY_5_SECONDS)
   async handleOutboxCron(): Promise<void> {
-    if (this.isProcessing) {
+    if (this.isProcessing || this.gracefulShutdown.isDraining) {
       this.logger.debug(
         'Previous outbox polling run still active, skipping tick',
       );
@@ -27,7 +31,9 @@ export class OutboxScheduler {
 
     this.isProcessing = true;
     try {
-      await this.outboxService.processOutbox();
+      await this.gracefulShutdown.runTracked('outbox-scheduler', () =>
+        this.outboxService.processOutbox(),
+      );
     } catch (error) {
       this.logger.error(
         `Error processing outbox: ${error?.message}`,

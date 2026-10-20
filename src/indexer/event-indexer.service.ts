@@ -52,6 +52,8 @@ export class EventIndexerService {
   private provider: ethers.JsonRpcProvider;
   private currentBlockNumber: number = 0;
   private isIndexing: boolean = false;
+  private pollTimer: ReturnType<typeof setTimeout> | null = null;
+  private loopPromise: Promise<void> | null = null;
 
   /** Effective batch size for the current backfill pass; reduced when the
    *  provider rejects a range as too large (fix 1.1). */
@@ -102,7 +104,7 @@ export class EventIndexerService {
           await this.initializeIndexingState(contract.address, event.name);
         }
       }
-      this.startIndexingLoop();
+      if (this.isIndexing) this.startIndexingLoop();
     } catch (error) {
       this.logger.error('Failed to start indexer:', error);
       this.isIndexing = false;
@@ -111,9 +113,14 @@ export class EventIndexerService {
   }
 
   /** Stop the indexing service. */
-  stop(): void {
+  async stop(): Promise<void> {
     this.logger.log('Stopping event indexer...');
     this.isIndexing = false;
+    if (this.pollTimer) {
+      clearTimeout(this.pollTimer);
+      this.pollTimer = null;
+    }
+    await this.loopPromise;
   }
 
   /** Get current indexing status. */
@@ -244,12 +251,15 @@ export class EventIndexerService {
         this.logger.error('Error in indexing loop:', error);
       } finally {
         if (this.isIndexing) {
-          setTimeout(poll, this.config.pollingIntervalMs);
+          this.pollTimer = setTimeout(() => {
+            this.pollTimer = null;
+            this.loopPromise = poll();
+          }, this.config.pollingIntervalMs);
         }
       }
     };
 
-    poll();
+    this.loopPromise = poll();
   }
 
   // ─── High-throughput adaptive backfill (fix 1.2) ────────────────────────────

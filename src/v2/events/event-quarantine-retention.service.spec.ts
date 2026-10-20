@@ -1,5 +1,6 @@
 import { EventQuarantineRetentionService } from './event-quarantine-retention.service';
 import { QuarantineStatus } from './entities/event-quarantine.entity';
+import { GracefulShutdownService } from '../../common/lifecycle/graceful-shutdown.service';
 
 function build(days: unknown = 90, affected = 2) {
   const repo = {
@@ -10,6 +11,7 @@ function build(days: unknown = 90, affected = 2) {
   const service = new EventQuarantineRetentionService(
     repo as never,
     config as never,
+    new GracefulShutdownService(),
     audit as never,
   );
   return { service, repo, audit };
