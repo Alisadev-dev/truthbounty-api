@@ -44,25 +44,25 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
         password,
         db,
         tls: tls ? {} : undefined,
+        connectTimeout: 5000,
+        commandTimeout: 5000,
+        enableOfflineQueue: false,
         retryStrategy: (times) => {
-          if (times > 3) {
-            this.logger.error('Redis connection failed after 3 retries');
-            return null; // Stop retrying
-          }
-          const delay = Math.min(times * 50, 2000);
-          return delay;
+          return Math.min(times * 50, 2000);
         },
         maxRetriesPerRequest: 3,
       });
 
-      this.client.on('connect', () => {
+      this.client.on('ready', () => {
         this.isConnected = true;
         this.logger.log('Redis connected successfully');
       });
 
       this.client.on('error', (error) => {
         this.isConnected = false;
-        this.logger.error(`Redis connection error: ${error.message}`);
+        this.logger.error(
+          `Redis connection error: ${this.getErrorMessage(error)}`,
+        );
       });
 
       this.client.on('close', () => {
@@ -70,28 +70,47 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
         this.logger.warn('Redis connection closed');
       });
 
+      this.client.on('end', () => {
+        this.isConnected = false;
+      });
+
       // Test connection
       await this.client.ping();
       this.logger.log(`Redis connected to ${host}:${port}`);
     } catch (error) {
+      this.isConnected = false;
       if (
         ['production', 'staging'].includes(
           this.configService.get('NODE_ENV', 'development'),
         )
       ) {
         this.client?.disconnect();
-        throw new Error('Redis unavailable during startup');
+        this.client = null;
+        throw new Error('Redis unavailable during startup', { cause: error });
       }
-      this.logger.error(`Failed to initialize Redis: ${error.message}`);
+      this.logger.error(
+        `Failed to initialize Redis: ${this.getErrorMessage(error)}`,
+      );
       this.logger.warn('Application will continue without Redis caching');
-      this.client = null;
     }
   }
 
   async onModuleDestroy() {
-    if (this.client) {
-      await this.client.quit();
+    const client = this.client;
+    this.client = null;
+    this.isConnected = false;
+    if (!client) {
+      return;
+    }
+
+    try {
+      await client.quit();
       this.logger.log('Redis connection closed');
+    } catch (error) {
+      client.disconnect();
+      this.logger.error(
+        `Failed to close Redis gracefully: ${this.getErrorMessage(error)}`,
+      );
     }
   }
 
@@ -107,7 +126,9 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     try {
       return await this.client.get(key);
     } catch (error) {
-      this.logger.error(`Redis GET error for key ${key}: ${error.message}`);
+      this.logger.error(
+        `Redis GET error for key ${key}: ${this.getErrorMessage(error)}`,
+      );
       return null;
     }
   }
@@ -129,7 +150,9 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
       }
       return true;
     } catch (error) {
-      this.logger.error(`Redis SET error for key ${key}: ${error.message}`);
+      this.logger.error(
+        `Redis SET error for key ${key}: ${this.getErrorMessage(error)}`,
+      );
       return false;
     }
   }
@@ -157,7 +180,9 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
       }
       return res === 'OK';
     } catch (error) {
-      this.logger.error(`Redis SETNX error for key ${key}: ${error.message}`);
+      this.logger.error(
+        `Redis SETNX error for key ${key}: ${this.getErrorMessage(error)}`,
+      );
       return true; // fallback to DB on error
     }
   }
@@ -175,7 +200,9 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
       await this.client.del(key);
       return true;
     } catch (error) {
-      this.logger.error(`Redis DEL error for key ${key}: ${error.message}`);
+      this.logger.error(
+        `Redis DEL error for key ${key}: ${this.getErrorMessage(error)}`,
+      );
       return false;
     }
   }
@@ -251,7 +278,9 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     try {
       return await this.client.ttl(key);
     } catch (error) {
-      this.logger.error(`Redis TTL error for key ${key}: ${error.message}`);
+      this.logger.error(
+        `Redis TTL error for key ${key}: ${this.getErrorMessage(error)}`,
+      );
       return null;
     }
   }
@@ -259,7 +288,11 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
   /**
    * Execute a Lua script
    */
-  async eval(script: string, numKeys: number, ...args: any[]): Promise<any> {
+  async eval(
+    script: string,
+    numKeys: number,
+    ...args: (string | Buffer | number)[]
+  ): Promise<unknown> {
     if (!this.client || !this.isConnected) {
       this.logger.error('Redis unavailable, failing closed for rate limit');
       throw new Error('Redis unavailable (Fail Closed)');
@@ -268,8 +301,10 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     try {
       return await this.client.eval(script, numKeys, ...args);
     } catch (error) {
-      this.logger.error(`Redis EVAL error: ${error.message}`);
-      throw new Error('Redis operation failed (Fail Closed)');
+      this.logger.error(`Redis EVAL error: ${this.getErrorMessage(error)}`);
+      throw new Error('Redis operation failed (Fail Closed)', {
+        cause: error,
+      });
     }
   }
 
@@ -285,8 +320,12 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     try {
       return await this.client.pttl(key);
     } catch (error) {
-      this.logger.error(`Redis PTTL error for key ${key}: ${error.message}`);
-      throw new Error('Redis operation failed (Fail Closed)');
+      this.logger.error(
+        `Redis PTTL error for key ${key}: ${this.getErrorMessage(error)}`,
+      );
+      throw new Error('Redis operation failed (Fail Closed)', {
+        cause: error,
+      });
     }
   }
 
@@ -302,8 +341,12 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     try {
       return await this.client.exists(key);
     } catch (error) {
-      this.logger.error(`Redis EXISTS error for key ${key}: ${error.message}`);
-      throw new Error('Redis operation failed (Fail Closed)');
+      this.logger.error(
+        `Redis EXISTS error for key ${key}: ${this.getErrorMessage(error)}`,
+      );
+      throw new Error('Redis operation failed (Fail Closed)', {
+        cause: error,
+      });
     }
   }
 
@@ -319,7 +362,9 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
       const result = await this.client.ping();
       return result === 'PONG';
     } catch (error) {
-      this.logger.error(`Redis health check failed: ${error.message}`);
+      this.logger.error(
+        `Redis health check failed: ${this.getErrorMessage(error)}`,
+      );
       return false;
     }
   }
@@ -338,7 +383,7 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
       this.logger.warn('Redis flushed all data');
       return true;
     } catch (error) {
-      this.logger.error(`Redis FLUSHALL error: ${error.message}`);
+      this.logger.error(`Redis FLUSHALL error: ${this.getErrorMessage(error)}`);
       return false;
     }
   }
@@ -358,5 +403,9 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
    */
   getClient(): Redis | null {
     return this.client;
+  }
+
+  private getErrorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
   }
 }
