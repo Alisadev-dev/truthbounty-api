@@ -18,6 +18,7 @@ import { ClaimReadModel } from './entities/claim-read-model.entity';
 import { ClaimProjectorService } from './claim-projector.service';
 import { ClaimLifecycleController } from './claim-lifecycle.controller';
 import { IpfsModule } from '../ipfs/ipfs.module';
+import { ClaimLifecycleErrorFilter } from './claim-lifecycle.errors';
 import { SecretQuarantine } from './entities/secret-quarantine.entity';
 import { SecretQuarantineAccessLog } from './entities/secret-quarantine-access-log.entity';
 import { SecretScannerService } from './secret-scanner.service';
@@ -53,6 +54,7 @@ import { SecretScanningMiddleware } from '../common/middleware/secret-scanning.m
     EvidenceFlagService,
     ClaimProjectorService,
     ClaimResolutionService,
+    ClaimLifecycleErrorFilter,
     SecretScannerService,
     SecretQuarantineService,
   ],
