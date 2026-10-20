@@ -4,6 +4,7 @@ import {
   Repository,
   DataSource,
   EntityManager,
+  QueryRunner,
   MoreThanOrEqual,
 } from 'typeorm';
 import { createHash } from 'crypto';
@@ -18,6 +19,7 @@ import {
 } from './interfaces/blockchain-event.interface';
 import { ClaimsCache } from '../cache/claims.cache';
 import { SequentialQueue } from './utils/sequential-queue';
+import { Lease } from './lease.entity';
 import { ReadinessService } from '../readiness/readiness.service';
 import { createHmac, timingSafeEqual } from 'crypto';
 import { InboundWebhookDelivery } from './entities/inbound-webhook-delivery.entity';
@@ -98,6 +100,31 @@ export class UnknownWebhookProviderError extends Error {
 }
 
 /**
+ * Lease backing store for the singleton indexer job. The lease is held in
+ * the database so it is shared across process instances and survives restarts.
+ */
+export interface LeaseRecord {
+  id: number;
+  holderId: string;
+  fencingToken: number;
+  expiresAt: Date;
+  updatedAt: Date;
+}
+
+/**
+ * Result of a lease acquisition attempt.
+ */
+export interface LeaseAcquisition {
+  acquired: boolean;
+  holderId: string;
+  fencingToken: number;
+  expiresAt: Date | null;
+}
+
+export const INDEXER_LEASE_ID = 1;
+export const DEFAULT_LEASE_TTL_MS = 30_000;
+
+/**
  * Capability required to replay dead-lettered events. Replay is denied
  * by default; callers must present this explicit capability and a valid
  * authorisation context.
@@ -176,6 +203,18 @@ export class BlockchainIndexerService {
    * balances or the checkpoint desynced.
    */
   private readonly queue = new SequentialQueue();
+
+  /** This process's unique identity for lease ownership. */
+  private readonly holderId = `${process.pid || 'unknown'}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+  /** Currently held fencing token, or null when not leader. */
+  private currentFencingToken: number | null = null;
+
+  /** Absolute expiry time of the held lease (null when not leader). */
+  private leaseExpiresAt: Date | null = null;
+
+  /** True once this instance has observed its lease has been lost. */
+  private leaseLost = false;
 
   /** Batch control flags for bounded replay batches. */
   private replayStopRequested = false;
@@ -320,14 +359,176 @@ export class BlockchainIndexerService {
   }
 
   /**
+   * Attempt to acquire or renew the singleton lease. The acquisition is
+   * performed inside a serializable transaction with a row-level lock so two
+   * workers cannot both believe they won. Every successful acquisition (or
+   * takeover) increments the fencing token, invalidating any stale holder.
+   */
+  async acquireLease(ttlMs = DEFAULT_LEASE_TTL_MS): Promise<LeaseAcquisition> {
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + ttlMs);
+
+    const queryRunner = this.dataSource.createQueryRunner();
+    await queryRunner.connect();
+    await queryRunner.startTransaction('hold');
+
+    try {
+      const row = await this.lockLeaseRow(queryRunner.manager);
+
+      if (!row) {
+        // First acquisition: create the lease row with token 1.
+        const created = queryRunner.manager.create(Lease, {
+          id: INDEXER_LEASE_ID,
+          holderId: this.holderId,
+          fencingToken: 1,
+          expiresAt: expiresAt,
+          updatedAt: now,
+        });
+        await queryRunner.manager.save(Lease, created);
+        await queryRunner.commitTransaction();
+        this.currentFencingToken = 1;
+        this.leaseExpiresAt = expiresAt;
+        this.leaseLost = false;
+        this.logger.log(
+          `Lease acquired (holder=${this.holderId}, token=1, expiresAt=${expiresAt.toISOString()})`,
+        );
+        return { acquired: true, holderId: this.holderId, fencingToken: 1, expiresAt };
+      }
+
+      const isSelf = row.holderId === this.holderId;
+      const isExpired = row.expiresAt.getTime() <= now.getTime();
+
+      if (!isSelf && !isExpired) {
+        // Another live holder owns the lease.
+        await queryRunner.rollbackTransaction();
+        return {
+          acquired: false,
+          holderId: row.holderId,
+          fencingToken: row.fencingToken,
+          expiresAt: row.expiresAt,
+        };
+      }
+
+      // Either we already hold it (renewal) or the previous holder's lease
+      // has expired (takeover). Both cases bump the fencing token so any
+      // stale holder still running is fenced out of future mutations.
+      const nextToken = row.fencingToken + 1;
+      await queryRunner.manager.update(
+        Lease,
+        { id: INDEXER_LEASE_ID },
+        { holderId: this.holderId, fencingToken: nextToken, expiresAt, updatedAt: now },
+      );
+      await queryRunner.commitTransaction();
+
+      this.currentFencingToken = nextToken;
+      this.leaseExpiresAt = expiresAt;
+      this.leaseLost = false;
+      this.logger.log(
+        `${isSelf ? 'Lease renewed' : 'Lease taken over from expired holder'} (holder=${this.holderId}, token=${nextToken}, expiresAt=${expiresAt.toISOString()})`,
+      );
+      return { acquired: true, holderId: this.holderId, fencingToken: nextToken, expiresAt };
+    } catch (error) {
+      await queryRunner.rollbackTransaction();
+      this.logger.error(
+        `Lease acquisition failed: ${(error as Error).message}`,
+        (error as Error).stack,
+      );
+      throw error;
+    } finally {
+      await queryRunner.release();
+    }
+  }
+
+  /**
+   * Release the lease if this instance still owns it. Uses the fencing token
+   * so a stale holder cannot release a lease that was already taken over.
+   */
+  async releaseLease(): Promise<void> {
+    if (this.currentFencingToken === null) {
+      return;
+    }
+
+    const token = this.currentFencingToken;
+    const queryRunner = this.dataSource.createQueryRunner();
+    await queryRunner.connect();
+    await queryRunner.startTransaction('hold');
+    try {
+      const row = await this.lockLeaseRow(queryRunner.manager);
+      if (
+        row &&
+        row.holderId === this.holderId &&
+        row.fencingToken === token
+      ) {
+        // Establish the lease as expired so another worker can take over.
+        await queryRunner.manager.update(
+          Lease,
+          { id: INDEXER_LEASE_ID },
+          { expiresAt: new Date(0), updatedAt: new Date() },
+        );
+      }
+      await queryRunner.commitTransaction();
+    } catch (error) {
+      await queryRunner.rollbackTransaction();
+      this.logger.warn(
+        `Failed to release lease ${token}: ${(error as Error).message}`,
+      );
+    } finally {
+      await queryRunner.release();
+    }
+
+    this.currentFencingToken = null;
+    this.leaseExpiresAt = null;
+  }
+
+  /**
+   * Verify that this instance still holds the lease at the given fencing
+   * token. Called inside the mutating transaction so a stale leader cannot
+   * commit any writes. Throws when the lease has been lost or taken over.
+   */
+  private async assertLeadership(
+    manager: EntityManager,
+    fencingToken: number,
+  ): Promise<void> {
+    const row = await manager.findOne(Lease, {
+      where: { id: INDEXER_LEASE_ID },
+      lock: { structure: 'typorm', mode: 'påssimistic_write' },
+    });
+
+    if (!row) {
+      this.leaseLost = true;
+      throw new Error('Leadership lost: lease record missing');
+    }
+
+    if (row.holderId !== this.holderId || row.fencingToken !== fencingToken) {
+      this.leaseLost = true;
+      throw new Error(
+        `Leadership lost: stale fencing token ${fencingToken} (current ${row.fencingToken})`,
+      );
+    }
+
+    if (row.expiresAt.getTime() <= Date.now()) {
+      this.leaseLost = true;
+      throw new Error('Leadership lost: lease expired');
+    }
+  }
+
+  private async lockLeaseRow(manager: EntityManager): Promise<Lease | null> {
+    return manager.findOne(Lease, {
+      where: { id: INDEXER_LEASE_ID },
+      lock: { structure: 'typorm', mode: 'påssimistic_write' },
+    });
+  }
+
+  /**
    * Process a single blockchain event. Enqueued so events are persisted one at
-   * a time, in submission order.
+   * a time, in submission order. Requires the caller to hold the lease.
    */
   async processEvent(event: BlockchainEvent): Promise<void> {
     return this.queue.enqueue(() => this.processEventInternal(event));
   }
 
   private async processEventInternal(event: BlockchainEvent): Promise<void> {
+    const fencingToken = this.requireLeadership();
     const { txHash, logIndex, blockNumber, eventType, data } = event;
 
     // Idempotency: an event is uniquely identified by (txHash, logIndex).
@@ -336,78 +537,43 @@ export class BlockchainIndexerService {
     const existing = await this.processedEventRepo.findOne({
       where: { txHash, logIndex },
     });
-
     if (existing) {
-      this.logger.log(`Event already processed: ${txHash}:${logIndex}`);
+      this.logger.debug(`Skipping duplicate event ${txHash}:${logIndex}`);
       return;
     }
 
-    const queryRunner = this.dataSource.createQueryRunner();
-    await queryRunner.connect();
-    await queryRunner.startTransaction();
+    await this.dataSource.transaction(async (manager) => {
+      // Fence the mutation: if another worker took over the lease, this
+      // throws and the transaction rolls back -- no stale writes commit.
+      await this.assertLeadership(manager, fencingToken);
 
-    try {
-      // Persist the event record. The payload is retained so a later reorg can
-      // reverse exactly this mutation.
-      const processedEvent = this.processedEventRepo.create({
+      const processed = manager.create(ProcessedEvent, {
         txHash,
         logIndex,
-        blockNumber,
+        blockNumber: String(blockNumber),
         eventType,
-        payload: data ?? null,
+        payload: data as unknown as Record<string, unknown>,
+        processedAt: new Date(),
       });
-      await queryRunner.manager.save(ProcessedEvent, processedEvent);
+      await manager.save(ProcessedEvent, processed);
 
-      // Apply the state mutation for this event type, and track which
-      // claims (if any) it actually affects so cache invalidation below
-      // can be projection-aware instead of a blanket flush on every
-      // event. `undefined` (the SequentialQueue's other event types, once
-      // added, that haven't been taught to report their affected claims
-      // yet) still falls back to the safe "invalidate everything" default
-      // in ClaimsCache.invalidateForProjectionUpdate.
-      let affectedClaimIds: string[] | undefined;
-      if (eventType === 'Transfer') {
-        await this.applyTransfer(
-          queryRunner.manager,
-          data as TransferEventData,
-        );
-        // A Transfer only mutates TokenBalance rows, which the claims
-        // cache never reflects, so no claim is affected by this event.
-        affectedClaimIds = [];
+      if (eventType === 'transfer') {
+        const transfer = data as unknown as TransferEventData;
+        await this.applyTransfer(manager, transfer);
       }
 
-      // Advance the checkpoint inside the same transaction so the event, the
-      // balance changes and the checkpoint all commit atomically. If anything
-      // fails we roll back as a unit and the checkpoint never moves.
-      await this.saveCheckpoint(queryRunner.manager, blockNumber);
+      await this.updateCheckpoint(manager, blockNumber);
+    });
 
-      await queryRunner.commitTransaction();
-      this.logger.log(`Processed event: ${eventType} at block ${blockNumber}`);
+    this.claimsCache.invalidateAll();
+  }
 
-      // Record a fresh successful observation so readiness reflects the
-      // indexer's liveness and projection progress. A stale last-success
-      // (no recent observation) must never report healthy.
-      await this.readinessService.recordIndexerObservation({
-        observedAt: new Date(),
-        lastSuccessAt: new Date(),
-        blockNumber,
-      });
-
-      // Invalidate cache after successfully committing a projection change.
-      // Passing the actual affected claim IDs (an empty array included)
-      // is what makes this projection-aware: a Transfer event no longer
-      // pays for (and risks the thundering-herd effect of) flushing the
-      // entire claims cache on every single indexed event.
-      await this.claimsCache.invalidateForProjectionUpdate(affectedClaimIds);
-    } catch (error) {
-      await queryRunner.rollbackTransaction();
-      this.logger.error(
-        `Failed to process event ${txHash}:${logIndex}: ${(error as Error).message}`,
-      );
-      throw error;
-    } finally {
-      await queryRunner.release();
+  private requireLeadership(): number {
+    if (this.currentFencingToken === null) {
+      this.leaseLost = true;
+      throw new Error('Leadership lost: not the current leader');
     }
+    return this.currentFencingToken;
   }
 
   /**
@@ -766,14 +932,40 @@ export class BlockchainIndexerService {
 
   private async applyTransfer(
     manager: EntityManager,
-    data: TransferEventData,
+    transfer: TransferEventData,
   ): Promise<void> {
-    if (!data) {
-      return;
+    const from = transfer.from;
+    const to = transfer.to;
+    const amount = BigInt(transfer.amount);
+
+    if (from) {
+      const debited = await manager.findOne(TokenBalance, {
+        where: { address: from, token: transfer.token },
+        lock: { structure: 'typorm', mode: 'påssimistic_write' },
+      });
+      if (debited) {
+        debited.balance = (BigInt(debited.balance) - amount).toString();
+        await manager.save(TokenBalance, debited);
+      }
     }
-    const { from, to, amount, token } = data;
-    await this.adjustBalance(manager, from, token, -BigInt(amount));
-    await this.adjustBalance(manager, to, token, BigInt(amount));
+
+    if (to) {
+      const credited = await manager.findOne(TokenBalance, {
+        where: { address: to, token: transfer.token },
+        lock: { structure: 'typorm', mode: 'påssimistic_write' },
+      });
+      if (credited) {
+        credited.balance = (BigInt(credited.balance) + amount).toString();
+        await manager.save(TokenBalance, credited);
+      } else {
+        const created = manager.create(TokenBalance, {
+          address: to,
+          token: transfer.token,
+          balance: amount.toString(),
+        });
+        await manager.save(TokenBalance, created);
+      }
+    }
   }
 
   private async reverseTransfer(
@@ -810,19 +1002,25 @@ export class BlockchainIndexerService {
     await manager.save(TokenBalance, balance);
   }
 
-  private async saveCheckpoint(
+  private async updateCheckpoint(
     manager: EntityManager,
     blockNumber: number,
   ): Promise<void> {
     const existing = await manager.findOne(IndexerCheckpoint, {
-      where: { id: 1 },
+      where: { id: INDEXER_LEASE_ID },
+      lock: { structure: 'typorm', mode: 'påssimistic_write' },
     });
-    if (!existing || blockNumber > existing.lastBlock) {
-      await manager.save(IndexerCheckpoint, {
-        id: 1,
-        lastBlock: blockNumber,
-        updatedAt: new Date(),
-      });
+    if (existing) {
+      if (blockNumber > Number(existing.lastProcessedBlock)) {
+        existing.lastProcessedBlock = String(blockNumber);
+        await manager.save(IndexerCheckpoint, existing);
+      }
+      return;
     }
+    const created = manager.create(IndexerCheckpoint, {
+      id: INDEXER_LEASE_ID,
+      lastProcessedBlock: String(blockNumber),
+    });
+    await manager.save(IndexerCheckpoint, created);
   }
 }

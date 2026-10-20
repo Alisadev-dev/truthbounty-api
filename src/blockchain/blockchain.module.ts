@@ -16,6 +16,9 @@ import { WeightedVoteResolutionService } from './weighted-vote-resolution.servic
 import { SybilResistanceModule } from '../sybil-resistance/sybil-resistance.module';
 import { StartupValidationService } from './startup-validation.service';
 import { DeterministicRpcFailoverService } from './deterministic-rpc-failover.service';
+import { LeaderElectionService } from './leader-election.service';
+import { Lease } from './lease.entity';
+import { FencingToken } from './fencing-token.entity';
 import { ReadinessService } from './readiness.service';
 import { DependencyProvenanceService } from './dependency-provenance.service';
 import { AdminAuditModule } from '../audit/admin-audit.module';
@@ -32,6 +35,8 @@ import { WebhookController } from './webhook.controller';
       TokenBalance,
       IndexerCheckpoint,
       DeadLetterReplay,
+      Lease,
+      FencingToken,
       WebhookDeliveryEntity,
     ]),
     SybilResistanceModule,
@@ -47,6 +52,7 @@ import { WebhookController } from './webhook.controller';
     EventIndexingService,
     StartupValidationService,
     DeterministicRpcFailoverService,
+    LeaderElectionService,
     DeadLetterReplayService,
     WeightedVoteResolutionService,
     WebhookSignatureService,
@@ -62,6 +68,7 @@ import { WebhookController } from './webhook.controller';
     ReconciliationService,
     EventIndexingService,
     DeterministicRpcFailoverService,
+    LeaderElectionService,
     DeadLetterReplayService,
     WeightedVoteResolutionService,
     WebhookSignatureService,
