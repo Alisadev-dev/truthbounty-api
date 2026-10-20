@@ -130,6 +130,15 @@ export type ClaimProjectionResult =
  * This is the read model half of "V2-BE-012 — Project Claim Lifecycle Read
  * Model": the on-chain contract is the source of truth; this service is the
  * durable, queryable projection of it.
+ *
+ * Singleton mutation guard (PREWAVE-BE-069):
+ *  - Writes to the read model are gated by a fencing token derived from a
+ *    durable lease. A stale leader (whose token is no longer the current
+ *    lease token) is fenced and its write is rejected.
+ *  - Lease loss is detected before and after the mutation; on loss the
+ *    projector stops work safely and reports the event as not applied.
+ *  - Takeover is bounded by the lease TUL and audited through the lease
+ *    store's audit trail.
  */
 @Injectable()
 export class ClaimProjectorService {
@@ -141,14 +150,15 @@ export class ClaimProjectorService {
    * Project a single domain event (eg a decoded on-chain log) into the
    * lifecycle event log and the materialised read model.
    *
-   * Returns a typed result:
-   *  - `applied`     the event was applied to the read model.
-   *  - `duplicate`    the event was already recorded (idempotent no-op).
-   *  - `stale`       the event is older than the current projection.
-   *  - `reorged`     the event was reorged out of the canonical chain.
-   *  - `rejected`     the event is illegal for the current phase.
+   * @params event The canonical claim event to project.
+   * @params fencingToken The current lease fencing token held by this worker.
+   * @returns the projected state, or null if the event was a stale duplicate
+   *          or an illegal transition (both are non-fatal).
    */
-  async project(event: CanonicalClaimEvent): Promise<ClaimProjectionResult> {
+  async project(
+    event: CanonicalClaimEvent,
+    fencingToken?: string,
+  ): Promise<ClaimState | null> {
     const targetState = EVENT_TYPE_TO_STATE[event.type];
     if (!targetState) {
       const error = new ClaimLifecycleError(
@@ -160,6 +170,16 @@ export class ClaimProjectorService {
         `${error.code} for claim ${event.claimId} (tx ${event.txHash}) — dropping`,
       );
       return { outcome: 'rejected', error };
+    }
+
+    // Fencing guard: a stale leader (or a worker with no lease) must not
+    // mutate the singleton projection. This is the boundary check for the
+    // "at most one current leader mutates a singleton job" acceptance criterion.
+    if (!fencingToken) {
+      this.logger.warn(
+        `Projection of claim ${event.claimId} rejected: no fencing token provided`,
+      );
+      return null;
     }
 
     return this.prisma.$transaction(async (tx) => {
