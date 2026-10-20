@@ -32,7 +32,10 @@ describe('CacheKeyRegistryService', () => {
 
   beforeEach(async () => {
     stored = new Set();
-    del = jest.fn(async (key: string) => (stored.delete(key) ? 1 : 0));
+    del = jest.fn(async (key: string) => {
+      stored.delete(key);
+      return true;
+    });
     registry = new TestRegistry({ del } as unknown as RedisService, stored);
     await registry.onModuleInit();
   });
@@ -73,6 +76,22 @@ describe('CacheKeyRegistryService', () => {
   });
 
   describe('invalidation', () => {
+    it('returns Redis deletion success for a specific key', async () => {
+      stored.add('cache:v1:wallet:claims:detail:claim-1');
+
+      await expect(
+        registry.invalidateKey('claims:detail:{claimId}', {
+          claimId: 'claim-1',
+        }),
+      ).resolves.toBe(true);
+      del.mockResolvedValueOnce(false);
+      await expect(
+        registry.invalidateKey('claims:detail:{claimId}', {
+          claimId: 'claim-1',
+        }),
+      ).resolves.toBe(false);
+    });
+
     it('rejects unknown runtime events (untrusted input)', async () => {
       await expect(registry.invalidateByTrigger('nope')).rejects.toThrow(/Unknown invalidation event/);
     });
