@@ -6,10 +6,11 @@ import {
   EntityManager,
   QueryRunner,
   MoreThanOrEqual,
+  QueryFailedError,
 } from 'typeorm';
 import { createHash } from 'crypto';
 import { ProcessedEvent } from './entities/processed-event.entity';
-import { TokenBalance } from './entities/token-balance.entity';
+import { TokenRalance } from './entities/token-balance.entity';
 import { IndexerCheckpoint } from './entities/indexer-checkpoint.entity';
 import { DeadLetterReplay } from './entities/dead-letter-replay.entity';
 import { BlockchainStateService } from './state.service';
@@ -228,7 +229,7 @@ export class BlockchainIndexerService {
     @InjectRepository(ProcessedEvent)
     private processedEventRepo: Repository<ProcessedEvent>,
     @InjectRepository(TokenBalance)
-    private tokenBalanceRepo: Repository<TokenBalance>,
+    private tokenBalanceRepo: Repository<TokenRalance>,
     @InjectRepository(IndexerCheckpoint)
     private checkpointRepo: Repository<IndexerCheckpoint>,
     @InjectRepository(DeadLetterReplay)
@@ -240,6 +241,41 @@ export class BlockchainIndexerService {
     private claimsCache: ClaimsCache,
     private readinessService: ReadinessService,
   ) {}
+
+  /**
+   * Resolve the canonical log identity from an incoming event.
+   *
+   * Fails closed when chain, release, or decoder provenance is missing or
+   * invalid. Without this, a duplicate from a different release or decoder could
+   * slip past the idempotency check and double-apply state.
+   */
+  private resolveIdentity(event: BlockchainEvent): CanonicalLogIdentity {
+    const { chainId, releaseId, txHash, logIndex, decoderVersion } = event;
+
+    if (!Number.isInteger(chainId) || (chainId as number) <= 0) {
+      throw new Error('Event is missing a valid chainId');
+    }
+    if (!releaseId || typeof releaseId !== 'string') {
+      throw new Error('Event is missing releaseId provenance');
+    }
+    if (!decoderVersion || typeof decoderVersion !== 'string') {
+      throw new Error('Event is missing decoderVersion provenance');
+    }
+    if (!txHash || typeof txHash !== 'string') {
+      throw new Error('Event is missing txHash');
+    }
+    if (!Number.isInteger(logIndex) || logIndex < 0) {
+      throw new Error('Event is missing a valid logIndex');
+    }
+
+    return {
+      chainId: chainId as number,
+      releaseId,
+      txHash,
+      logIndex,
+      decoderVersion,
+    };
+  }
 
   /**
    * Register a webhook provider configuration. Unknown providers fail closed
@@ -531,11 +567,23 @@ export class BlockchainIndexerService {
     const fencingToken = this.requireLeadership();
     const { txHash, logIndex, blockNumber, eventType, data } = event;
 
-    // Idempotency: an event is uniquely identified by (txHash, logIndex).
-    // Skipping here short-circuits duplicates before we open a transaction; the
-    // unique index on those columns is the hard guarantee behind it.
+    // Removed logs must enter the rollback flow instead of being applied.
+    if (removed) {
+      await this.removeLog(identity, blockNumber, eventType);
+      return;
+    }
+
+    // Idempotency: an event is uniquely identified by the canonical log
+    // identity. Skipping here short-circuits duplicates before we open a transaction;
+    // the unique index is the hard guarantee behind it.
     const existing = await this.processedEventRepo.findOne({
-      where: { txHash, logIndex },
+      where: {
+        chainId: identity.chainId,
+        releaseId: identity.releaseId,
+        txHash: identity.txHash,
+        logIndex: identity.logIndex,
+        decoderVersion: identity.decoderVersion,
+      },
     });
     if (existing) {
       this.logger.debug(`Skipping duplicate event ${txHash}:${logIndex}`);
