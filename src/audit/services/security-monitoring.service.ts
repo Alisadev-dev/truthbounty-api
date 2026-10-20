@@ -1,5 +1,6 @@
+import { getRuntimeEnvironment } from '../../config/runtime-config';
 import { Injectable, Logger } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
+import { InjectRepository } from '@nestjs/typeiorm';
 import { Repository, MoreThan, In } from 'typeorm';
 import {
   AuditLog,
@@ -9,6 +10,7 @@ import {
 } from '../entities/audit-log.entity';
 import { SecurityIncident } from '../interfaces/audit-response.interface';
 import { randomUUID } from 'crypto';
+import { SecretDetectionService } from './secret-detection.service';
 
 export interface SecurityThresholds {
   maxFailedLogins: number;
@@ -32,6 +34,7 @@ export class SecurityMonitoringService {
   constructor(
     @InjectRepository(AuditLog)
     private readonly auditLogRepo: Repository<AuditLog>,
+    private readonly secretDetectionService: SecretDetectionService,
   ) {
     this.thresholds = this.loadThresholds();
   }
@@ -67,6 +70,28 @@ export class SecurityMonitoringService {
     }
 
     return null;
+  }
+
+  async scanSupportSubmission(
+    submissionId: string,
+    text: string,
+    attachments: Array<{ name: string; content: Buffer }> = [],
+  ): Promise<{ quarantined: boolean; reason?: string }> {
+    const result = await this.secretDetectionService.scanSubmission(
+      text,
+      attachments,
+    );
+    if (result.detected) {
+      this.logger.warn(
+        `Support submission ${submissionId} quarantined: ${result.category} detected`,
+      );
+      return {
+        quarantined: true,
+        reason:
+          'Your submission contains sensitive material and has been quarantined. Please remove any seed phrases, private keys, tokens, or credentials and resubmit.',
+      };
+    }
+    return { quarantined: false };
   }
 
   async checkPermissionEscalation(
@@ -247,22 +272,22 @@ export class SecurityMonitoringService {
   private loadThresholds(): SecurityThresholds {
     return {
       maxFailedLogins: parseInt(
-        process.env.AUDIT_MAX_FAILED_LOGINS ??
+        getRuntimeEnvironment().AUDIT_MAX_FAILED_LOGINS ??
           String(DEFAULT_THRESHOLDS.maxFailedLogins),
         10,
       ),
       maxPermissionChanges: parseInt(
-        process.env.AUDIT_MAX_PERMISSION_CHANGES ??
+        getRuntimeEnvironment().AUDIT_MAX_PERMISSION_CHANGES ??
           String(DEFAULT_THRESHOLDS.maxPermissionChanges),
         10,
       ),
       maxApiCallsPerMinute: parseInt(
-        process.env.AUDIT_MAX_API_CALLS ??
+        getRuntimeEnvironment().AUDIT_MAX_API_CALLS ??
           String(DEFAULT_THRESHOLDS.maxApiCallsPerMinute),
         10,
       ),
       suspiciousTimeWindowMinutes: parseInt(
-        process.env.AUDIT_SUSPICIOUS_WINDOW_MINUTES ??
+        getRuntimeEnvironment().AUDIT_SUSPICIOUS_WINDOW_MINUTES ??
           String(DEFAULT_THRESHOLDS.suspiciousTimeWindowMinutes),
         10,
       ),

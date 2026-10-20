@@ -14,6 +14,7 @@ import { getQueueToken } from '@nestjs/bullmq';
 import { Repository } from 'typeorm';
 import { Job } from 'bullmq';
 import { JobName, JobPriority, QueueName } from './jobs.types';
+import { GracefulShutdownService } from '../common/lifecycle/graceful-shutdown.service';
 
 jest.mock('../prisma/prisma.service', () => {
   return {
@@ -26,6 +27,10 @@ describe('JobsService', () => {
   let processor: JobsProcessor;
   let queueMock: any;
   let sybilResistanceServiceMock: any;
+  let shutdownMock: {
+    isDraining: boolean;
+    runTracked: jest.Mock;
+  };
 
   beforeEach(async () => {
     queueMock = {
@@ -47,11 +52,19 @@ describe('JobsService', () => {
     sybilResistanceServiceMock = {
       cleanupScoreHistory: jest.fn().mockResolvedValue(42),
     };
+    shutdownMock = {
+      isDraining: false,
+      runTracked: jest.fn((_name, operation) => operation()),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         JobsService,
         JobsProcessor,
+        {
+          provide: GracefulShutdownService,
+          useValue: shutdownMock,
+        },
         {
           provide: getQueueToken(QueueName.DEFAULT),
           useValue: queueMock,
@@ -120,6 +133,15 @@ describe('JobsService', () => {
   });
 
   describe('enqueue', () => {
+    it('does not enqueue new work after shutdown begins', async () => {
+      shutdownMock.isDraining = true;
+
+      await expect(
+        service.enqueue(JobName.CLEANUP_SYBIL_HISTORY, {}),
+      ).resolves.toBeNull();
+      expect(queueMock.add).not.toHaveBeenCalled();
+    });
+
     it('should enqueue a job with default options', async () => {
       const job = await service.enqueue(JobName.CLEANUP_SYBIL_HISTORY, {});
       expect(job).not.toBeNull();

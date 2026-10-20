@@ -11,8 +11,8 @@
  *
  * WHAT IT ENFORCES (exit 1 on violation under --check)
  * ----------------------------------------------------
- *   1. Node runtime satisfies engines.node (>=20 <21).
- *   2. npm client satisfies engines.npm (>=10 <11).
+ *   1. Node runtime satisfies engines.node (e.g. >=22.22 <23).
+ *   2. npm client satisfies engines.npm (e.g. >=10 <12).
  *   3. TypeScript compiler matches pinned version (6.0.3).
  *   4. Generated prerequisites (Prisma client) exist and are non-stale.
  *   5. Container context does not exclude test sources (.dockerignore parity).
@@ -56,6 +56,45 @@ function parseSemver(versionStr) {
   };
 }
 
+/**
+ * Minimal dependency-free range check for the simple engines constraints used
+ * in package.json (e.g. ">=22.22 <23", ">=10 <12"). Supports space-separated
+ * comparators with >=, >, <, <=, and exact versions. No hyphen/|| ranges.
+ */
+function satisfiesConstraint(version, constraint) {
+  if (!version || !constraint) return false;
+  const parsed = parseSemver(version);
+  if (!parsed) return false;
+  const current = [parsed.major, parsed.minor, parsed.patch];
+
+  const comparators = String(constraint).trim().split(/\s+/).filter(Boolean);
+  for (const comparator of comparators) {
+    const match = /^(>=|<=|>|<|=)?\s*(\d+)(?:\.(\d+))?(?:\.(\d+))?/.exec(comparator);
+    if (!match) return false;
+    const op = match[1] || '=';
+    const target = [
+      parseInt(match[2], 10),
+      match[3] !== undefined ? parseInt(match[3], 10) : 0,
+      match[4] !== undefined ? parseInt(match[4], 10) : 0,
+    ];
+    let cmp = 0;
+    for (let i = 0; i < 3; i++) {
+      if (current[i] !== target[i]) {
+        cmp = current[i] < target[i] ? -1 : 1;
+        break;
+      }
+    }
+    const pass =
+      (op === '>=' && cmp >= 0) ||
+      (op === '<=' && cmp <= 0) ||
+      (op === '>' && cmp > 0) ||
+      (op === '<' && cmp < 0) ||
+      (op === '=' && cmp === 0);
+    if (!pass) return false;
+  }
+  return true;
+}
+
 function checkNodeVersion(currentVersion, constraint) {
   const parsed = parseSemver(currentVersion);
   if (!parsed) {
@@ -67,15 +106,14 @@ function checkNodeVersion(currentVersion, constraint) {
     };
   }
 
-  // package.json constraint: ">=20 <21"
-  const ok = parsed.major === 20;
+  const ok = satisfiesConstraint(parsed.raw, constraint);
   return {
     ok,
     current: `v${parsed.raw}`,
     expected: constraint,
     diagnostic: ok
       ? null
-      : `Node runtime drift: running ${parsed.raw}, but required constraint is ${constraint}. Use Node 20.x (e.g. 'nvm use 20' or Docker container).`,
+      : `Node runtime drift: running ${parsed.raw}, but required constraint is ${constraint}. Use a Node version that satisfies engines.node (e.g. 'nvm use 22.22.3' or Docker container).`,
   };
 }
 
@@ -103,15 +141,15 @@ function checkNpmVersion(constraint) {
   }
 
   const parsed = parseSemver(npmVersion);
-  // package.json constraint: ">=10 <11"
-  const ok = parsed ? parsed.major === 10 : false;
+  // package.json constraint: ">=10 <12"
+  const ok = parsed ? satisfiesConstraint(parsed.raw, constraint) : false;
   return {
     ok,
     current: `v${npmVersion}`,
     expected: constraint,
     diagnostic: ok
       ? null
-      : `npm version drift: running ${npmVersion}, but required constraint is ${constraint}. Use npm 10.x.`,
+      : `npm version drift: running ${npmVersion}, but required constraint is ${constraint}. Use an npm version that satisfies engines.npm.`,
   };
 }
 

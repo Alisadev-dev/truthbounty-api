@@ -94,6 +94,18 @@ describe('WalletRateLimiterService (Cost-Aware Distributed Rate-Limit Budgets)',
     expect(result.isBlocked).toBe(true);
   });
 
+  it('rejects malformed Redis counter replies and uses valid Lua arguments', async () => {
+    const req = { path: '/auth/login', method: 'POST', ip: '127.0.0.1', headers: {} } as unknown as Request;
+    redisServiceMock.eval.mockResolvedValueOnce('invalid response');
+
+    await expect(service.checkRateLimit(req)).rejects.toThrow(
+      /Rate limit Redis failure \(Fail Closed\)/,
+    );
+    const [luaScript] = redisServiceMock.eval.mock.calls[0];
+    expect(luaScript).toContain('ARGV[2]');
+    expect(luaScript).toContain('KEYS[1]');
+  });
+
   it('4. IPv6 and proxy headers: correctly identifies client IP and trusted proxy headers', async () => {
     const req = {
       path: '/api/claims',

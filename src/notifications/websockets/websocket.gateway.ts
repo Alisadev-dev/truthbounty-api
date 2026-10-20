@@ -8,11 +8,12 @@ import {
   MessageBody,
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
-import { Logger } from '@nestjs/common';
+import { Logger, OnModuleInit } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { Notification } from '../entities/notification.entity';
 import { NotificationsService } from '../services/notifications.service';
+import { GracefulShutdownService } from '../../common/lifecycle/graceful-shutdown.service';
 
 interface AuthenticatedSocket extends Socket {
   userId?: string;
@@ -25,7 +26,7 @@ interface AuthenticatedSocket extends Socket {
   transports: ['websocket', 'polling'],
 })
 export class NotificationGateway
-  implements OnGatewayConnection, OnGatewayDisconnect
+  implements OnGatewayConnection, OnGatewayDisconnect, OnModuleInit
 {
   @WebSocketServer()
   server: Server;
@@ -37,9 +38,23 @@ export class NotificationGateway
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
     private readonly notificationsService: NotificationsService,
+    private readonly gracefulShutdown: GracefulShutdownService,
   ) {}
 
+  onModuleInit(): void {
+    this.gracefulShutdown.registerStopHook('notification-websocket', () => {
+      if (!this.server) return;
+      this.server.emit('server_shutdown', { retryable: true });
+      this.server.disconnectSockets(true);
+    });
+  }
+
   async handleConnection(@ConnectedSocket() client: AuthenticatedSocket) {
+    if (this.gracefulShutdown.isDraining) {
+      client.disconnect(true);
+      return;
+    }
+
     try {
       const token = client.handshake.auth.token || client.handshake.query.token;
 

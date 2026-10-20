@@ -3,10 +3,11 @@ import { ClaimsCache } from './claims.cache';
 import { CacheHealthService } from './cache-health.service';
 import { CacheKeyRegistryService } from './cache-key-registry.service';
 import { RedisModule } from '../redis/redis.module';
+import { MetricsCoreModule } from '../metrics/metrics-core.module';
 
 @Global()
 @Module({
-  imports: [RedisModule],
+  imports: [RedisModule, MetricsCoreModule],
   providers: [ClaimsCache, CacheHealthService, CacheKeyRegistryService],
   exports: [ClaimsCache, CacheHealthService, CacheKeyRegistryService],
 })
