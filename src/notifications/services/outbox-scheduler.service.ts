@@ -6,19 +6,20 @@ import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { OutboxEvent } from '../../outbox/entities/outbox-event.entity';
 import { NotificationProcessorJob } from './notification-processor.service';
+import { GracefulShutdownService } from '../../common/lifecycle/graceful-shutdown.service';
 
 /**
  * OutboxScheduler
- * 
+ *
  * Scheduled job that polls the outbox table for pending notification events.
  * Implements the transactional outbox pattern for guaranteed at-least-once delivery.
- * 
+ *
  * Flow:
  * 1. Query for PENDING outbox events (batch)
  * 2. Create BullMQ job for each event
  * 3. Update status to DISPATCHED
  * 4. On next run, only PENDING events are processed (failed jobs stay as PENDING)
- * 
+ *
  * Runs every 5 seconds (configurable)
  * Batch size: 50 events per poll
  */
@@ -34,6 +35,7 @@ export class OutboxScheduler {
     private outboxRepository: Repository<OutboxEvent>,
     @InjectQueue('notifications')
     private notificationQueue: Queue,
+    private readonly gracefulShutdown: GracefulShutdownService,
   ) {}
 
   /**
@@ -42,46 +44,57 @@ export class OutboxScheduler {
    */
   @Cron(CronExpression.EVERY_5_SECONDS)
   async pollOutbox(): Promise<void> {
+    if (this.gracefulShutdown.isDraining) return;
     try {
-      // Query pending events
-      const pendingEvents = await this.outboxRepository.find({
-        where: { status: 'PENDING' },
-        order: { createdAt: 'ASC' },
-        take: this.BATCH_SIZE,
-      });
+      await this.gracefulShutdown.runTracked(
+        'notification-outbox-scheduler',
+        async () => {
+          // Query pending events
+          const pendingEvents = await this.outboxRepository.find({
+            where: { status: 'PENDING' },
+            order: { createdAt: 'ASC' },
+            take: this.BATCH_SIZE,
+          });
 
-      if (pendingEvents.length === 0) {
-        return; // No events to process
-      }
+          if (pendingEvents.length === 0) {
+            return; // No events to process
+          }
 
-      this.logger.debug(`Found ${pendingEvents.length} pending notification events`);
-
-      // Process each event
-      const jobIds: string[] = [];
-      for (const event of pendingEvents) {
-        try {
-          const jobId = await this.createBullMQJob(event);
-          jobIds.push(jobId);
-        } catch (error) {
-          this.logger.error(
-            `Failed to create job for outbox event ${event.id}: ${error.message}`,
+          this.logger.debug(
+            `Found ${pendingEvents.length} pending notification events`,
           );
-        }
-      }
 
-      // Bulk update status to DISPATCHED for successfully created jobs
-      if (jobIds.length > 0) {
-        const eventIds = pendingEvents.slice(0, jobIds.length).map((e) => e.id);
-        await this.outboxRepository.update(
-          { id: In(eventIds) },
-          { status: 'DISPATCHED', jobId: jobIds[0] }, // TODO: store per-event jobId
-        );
+          // Process each event
+          const jobIds: string[] = [];
+          for (const event of pendingEvents) {
+            try {
+              const jobId = await this.createBullMQJob(event);
+              jobIds.push(jobId);
+            } catch (error) {
+              this.logger.error(
+                `Failed to create job for outbox event ${event.id}: ${error.message}`,
+              );
+            }
+          }
 
-        this.logger.log(
-          `Dispatched ${jobIds.length}/${pendingEvents.length} pending notification events`,
-        );
-      }
+          // Bulk update status to DISPATCHED for successfully created jobs
+          if (jobIds.length > 0) {
+            const eventIds = pendingEvents
+              .slice(0, jobIds.length)
+              .map((e) => e.id);
+            await this.outboxRepository.update(
+              { id: In(eventIds) },
+              { status: 'DISPATCHED', jobId: jobIds[0] }, // TODO: store per-event jobId
+            );
+
+            this.logger.log(
+              `Dispatched ${jobIds.length}/${pendingEvents.length} pending notification events`,
+            );
+          }
+        },
+      );
     } catch (error) {
+      if (this.gracefulShutdown.isDraining) return;
       this.logger.error(`Outbox polling failed: ${error.message}`, error.stack);
       // Continue polling on next interval despite errors
     }
@@ -216,7 +229,9 @@ export class OutboxScheduler {
   /**
    * Cleanup dispatched events older than retention period
    */
-  async cleanupOldDispatchedEvents(retentionHours: number = 24): Promise<number> {
+  async cleanupOldDispatchedEvents(
+    retentionHours: number = 24,
+  ): Promise<number> {
     const cutoffTime = new Date();
     cutoffTime.setHours(cutoffTime.getHours() - retentionHours);
 

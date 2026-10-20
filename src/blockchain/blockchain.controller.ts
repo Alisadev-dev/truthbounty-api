@@ -19,7 +19,16 @@ import { ReconciliationService } from './reconciliation.service';
 import { BlockchainStateService } from './state.service';
 import { WeightedVoteResolutionService } from './weighted-vote-resolution.service';
 import { ReadinessService } from './readiness.service';
-import { BlockInfo, ResolutionConfig, VerificationVote } from './types';
+import { DeadLetterReplayService } from './dead-letter-replay.service';
+import {
+  BlockInfo,
+  ResolutionConfig,
+  VerificationVote,
+  DeadLetterReplayRequest,
+  DeadLetterReplayResult,
+  DeadLetterBatchControlRequest,
+  DeadLetterBatchControlResult,
+} from './types';
 import {
   StreamEnvelope,
   StreamEnvelopeVersion,
@@ -29,6 +38,16 @@ import {
 } from './stream.types';
 import { StreamResumeService } from './stream-resume.service';
 import { WebhookSignatureService } from './webhook-signature.service';
+
+/**
+ * Request headers required for dead-letter replay authorization.
+ * The capability token is validated by the replay service against the
+ * configured protected capability and is never logged or echoed back.
+ */
+export interface ReplayAuthorizationHeaders {
+  'operator-id'?: string;
+  'replay-capability'?: string;
+}
 
 @ApiTags('blockchain')
 @Controller('api/v1/blockchain')
@@ -40,6 +59,7 @@ export class BlockchainController {
     private voteResolver: WeightedVoteResolutionService,
     private streamResume: StreamResumeService,
     private readinessService: ReadinessService,
+    private replayService: DeadLetterReplayService,
     private webhookSignatureService: WebhookSignatureService,
   ) {}
 
@@ -247,7 +267,7 @@ export class BlockchainController {
     } catch (error) {
       return {
         success: false,
-        error: error.message,
+        error: (error as Error).message,
       };
     }
   }
@@ -371,6 +391,86 @@ export class BlockchainController {
       );
     }
     return this.streamResume.inspectToken(token);
+  }
+
+  /**
+   * Replay a single dead-letter message.
+   *
+   * Replay is denied by default: the caller must supply the protected
+   * capability header, an explicit reason, bounds, a dry-run flag, and the
+   * original payload hash. The service enforces release/schema compatibility,
+   * idempotency, and audit recording.
+   */
+  @Post('dead-letter/replay')
+  @ApiTags('dead-letter')
+  async replayDeadLetter(
+    @Body() request: DeadLetterReplayRequest,
+    @Headers() headers: ReplayAuthorizationHeaders,
+  ): Promise<DeadLetterReplayResult> {
+    return this.replayService.replaySingle(request, {
+      capability: headers['replay-capability'],
+      operatorId: headers['operator-id'],
+    });
+  }
+
+  /**
+   * Replay a bounded batch of dead-letter messages.
+   */
+  @Post('dead-letter/replay/batch')
+  @ApiTags('dead-letter')
+  async replayDeadLetterBatch(
+    @Body() request: DeadLetterBatchControlRequest,
+    @Headers() headers: ReplayAuthorizationHeaders,
+  ): Promise<DeadLetterBatchControlResult> {
+    return this.replayService.replayBatch(request, {
+      capability: headers['replay-capability'],
+      operatorId: headers['operator-id'],
+    });
+  }
+
+  /**
+   * Stop an in-flight bounded replay batch.
+   */
+  @Post('dead-letter/replay/batch/:replayId/stop')
+  @ApiTags('dead-letter')
+  async stopDeadLetterReplayBatch(
+    @Param('replayId') replayId: string,
+    @Headers() headers: ReplayAuthorizationHeaders,
+  ): Promise<DeadLetterBatchControlResult> {
+    return this.replayService.stopBatch(replayId, {
+      capability: headers['replay-capability'],
+      operatorId: headers['operator-id'],
+    });
+  }
+
+  /**
+   * Resume a stopped bounded replay batch.
+   */
+  @Post('dead-letter/replay/batch/:replayId/resume')
+  @ApiTags('dead-letter')
+  async resumeDeadLetterReplayBatch(
+    @Param('replayId') replayId: string,
+    @Headers() headers: ReplayAuthorizationHeaders,
+  ): Promise<DeadLetterBatchControlResult> {
+    return this.replayService.resumeBatch(replayId, {
+      capability: headers['replay-capability'],
+      operatorId: headers['operator-id'],
+    });
+  }
+
+  /**
+   * Get the immutable audit record for a replay (original -> replay linkage).
+   */
+  @Get('dead-letter/replay/:replayId/audit')
+  @ApiTags('dead-letter')
+  async getDeadLetterReplayAudit(
+    @Param('replayId') replayId: string,
+    @Headers() headers: ReplayAuthorizationHeaders,
+  ) {
+    return this.replayService.getAuditRecord(replayId, {
+      capability: headers['replay-capability'],
+      operatorId: headers['operator-id'],
+    });
   }
 
   /**

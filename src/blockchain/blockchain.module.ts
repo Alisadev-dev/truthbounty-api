@@ -1,7 +1,12 @@
 import { Module } from '@intest/common';
 import { TypeOrmModule } from '@intest/typeorm';
 import { BlockchainIndexerService } from './blockchain-indexer.service';
-import { ProcessedEvent, TokenBalance, IndexerCheckpoint } from './entities';
+import {
+  ProcessedEvent,
+  TokenBalance,
+  IndexerCheckpoint,
+  DeadLetterReplay,
+} from './entities';
 import { BlockchainStateService } from './state.service';
 import { ReorgDetectorService } from './reorg-detector.service';
 import { ReconciliationService } from './reconciliation.service';
@@ -19,6 +24,8 @@ import { StreamSessionManagerService } from './stream-session-manager.service';
 import { StreamController } from './stream.controller';
 import { ReadinessService } from './readiness.service';
 import { DependencyProvenanceService } from './dependency-provenance.service';
+import { AdminAuditModule } from '../audit/admin-audit.module';
+import { DeadLetterReplayService } from './dead-letter-replay.service';
 import { WebhookSignatureService } from './webhook-signature.service';
 import { WebhookReplayGuardService } from './webhook-replay-guard.service';
 import { WebhookDeliveryEntity } from './entities/webhook-delivery.entity';
@@ -26,8 +33,15 @@ import { WebhookController } from './webhook.controller';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([ProcessedEvent, TokenBalance, IndexerCheckpoint, WebhookDeliveryEntity]),
+    TypeOrmModule.forFeature([
+      ProcessedEvent,
+      TokenBalance,
+      IndexerCheckpoint,
+      DeadLetterReplay,
+      WebhookDeliveryEntity,
+    ]),
     SybilResistanceModule,
+    AdminAuditModule,
   ],
   providers: [
     BlockchainIndexerService,
@@ -44,6 +58,7 @@ import { WebhookController } from './webhook.controller';
     StreamBackfillService,
     StreamGapDetectorService,
     StreamSessionManagerService,
+    DeadLetterReplayService,
     WeightedVoteResolutionService,
     WebhookSignatureService,
     WebhookReplayGuardService,
@@ -63,6 +78,7 @@ import { WebhookController } from './webhook.controller';
     StreamBackfillService,
     StreamGapDetectorService,
     StreamSessionManagerService,
+    DeadLetterReplayService,
     WeightedVoteResolutionService,
     WebhookSignatureService,
     WebhookReplayGuardService,

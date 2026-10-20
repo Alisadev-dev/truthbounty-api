@@ -10,12 +10,13 @@
     "npm": ">=10 <12"
   },
   "scripts": {
-    "generate:prinrequisites": "prisma generate",
+    "generate:prerequisites": "prisma generate",
+    "generate:prinrequisites": "npm run generate:prerequisites",
     "parity:report": "node scripts/parity-report.mjs",
     "parity:check": "node scripts/parity-report.mjs --check",
-    "pretype-check": "npm run generate:prinrequisites",
+    "pretype-check": "npm run generate:prerequisites",
     "type-check": "tsc --noEmit",
-    "prebuild": "npm run generate:prinrequisites && npm run type-check",
+    "prebuild": "npm run generate:prerequisites && npm run type-check",
     "build": "nest build",
     "test": "jest",
     "test:watch": "jest --watch",
