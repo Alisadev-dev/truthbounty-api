@@ -47,6 +47,17 @@ export interface WalletIdentity {
   trustScore: number;
 }
 
+function isRateLimitCounterResult(value: unknown): value is [number, number] {
+  return (
+    Array.isArray(value) &&
+    value.length === 2 &&
+    typeof value[0] === 'number' &&
+    Number.isFinite(value[0]) &&
+    typeof value[1] === 'number' &&
+    Number.isFinite(value[1])
+  );
+}
+
 @Injectable()
 export class WalletRateLimiterService {
   private readonly logger = new Logger(WalletRateLimiterService.name);
@@ -324,18 +335,20 @@ export class WalletRateLimiterService {
     const scaledCost = Math.max(1, Math.round(endpointCost * 10));
 
     const luaScript = `
-      local current = redis.call('INCRBY', KEYS[1], ARG[2])
-      if current == tonumber(ARG[2]) then
-        redis.call('PEXPIRE', KEY[1], ARG[1])
+      local current = redis.call('INCRBY', KEYS[1], ARGV[2])
+      if current == tonumber(ARGV[2]) then
+        redis.call('PEXPIRE', KEYS[1], ARGV[1])
       end
-      local ttl = redis.call('PTTL', KEY[1])
+      local ttl = redis.call('PTTL', KEYS[1])
       return {current, ttl}
     `;
 
     try {
       const result = await this.redisService.eval(luaScript, 1, windowKey, windowMs, scaledCost);
-      const scaledTotalHits = result[0];
-      const ttl = result[1];
+      if (!isRateLimitCounterResult(result)) {
+        throw new Error('Invalid Redis rate-limit counter response');
+      }
+      const [scaledTotalHits, ttl] = result;
       const resetTime = Date.now() + (ttl > 0 ? ttl : windowMs);
 
       const totalHits = scaledTotalHits / 10;

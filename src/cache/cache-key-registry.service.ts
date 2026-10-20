@@ -255,8 +255,7 @@ export class CacheKeyRegistryService implements OnModuleInit {
    */
   async invalidateKey(baseKey: string, params: Record<string, string> = {}): Promise<boolean> {
     const { key } = this.generateCacheKey(baseKey, params);
-    const result = await this.redisService.del(key);
-    return result > 0;
+    return this.redisService.del(key);
   }
 
   /**
