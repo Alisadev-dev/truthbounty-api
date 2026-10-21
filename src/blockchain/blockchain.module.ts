@@ -22,6 +22,9 @@ import { StreamBackfillService } from './stream-backfill.service';
 import { StreamGapDetectorService } from './stream-gap-detector.service';
 import { StreamSessionManagerService } from './stream-session-manager.service';
 import { StreamController } from './stream.controller';
+import { LeaderElectionService } from './leader-election.service';
+import { Lease } from './lease.entity';
+import { FencingToken } from './fencing-token.entity';
 import { ReadinessService } from './readiness.service';
 import { DependencyProvenanceService } from './dependency-provenance.service';
 import { AdminAuditModule } from '../audit/admin-audit.module';
@@ -38,6 +41,8 @@ import { WebhookController } from './webhook.controller';
       TokenBalance,
       IndexerCheckpoint,
       DeadLetterReplay,
+      Lease,
+      FencingToken,
       WebhookDeliveryEntity,
     ]),
     SybilResistanceModule,
@@ -58,6 +63,7 @@ import { WebhookController } from './webhook.controller';
     StreamBackfillService,
     StreamGapDetectorService,
     StreamSessionManagerService,
+    LeaderElectionService,
     DeadLetterReplayService,
     WeightedVoteResolutionService,
     WebhookSignatureService,
@@ -78,6 +84,7 @@ import { WebhookController } from './webhook.controller';
     StreamBackfillService,
     StreamGapDetectorService,
     StreamSessionManagerService,
+    LeaderElectionService,
     DeadLetterReplayService,
     WeightedVoteResolutionService,
     WebhookSignatureService,

@@ -1,18 +1,21 @@
 -- Enforce monotonic block cursor compare-and-swap and auditable rollbacks.
 -- CreateTable
-CREATE TABLE v2_chain_events (
-    id TEXT NOT NULL PRIMARY KEY,
-    chainId INTEGER NOT NULL,
-    contractAddress TEXT NOT NULL,
-    eventName TEXT NOT NULL,
-    blockNumber BIGINT NOT NULL,
-    blockHash TEXT NOT NULL,
-    txHash TEXT NOT NULL,
-    logIndex INTEGER NOT NULL,
-    blockTimestamp DATETIME,
-    payload JSONB NOT NULL,
-    rawArgs JSONB NOT NULL,
-    ingestedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+CREATE TABLE "v2_chain_events" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "chainId" INTEGER NOT NULL,
+    "releaseId" TEXT NOT NULL,
+    "decoderVersion" TEXT NOT NULL,
+    "contractAddress" TEXT NOT NULL,
+    "eventName" TEXT NOT NULL,
+    "blockNumber" BIGINT NOT NULL,
+    "blockHash" TEXT NOT NULL,
+    "txHash" TEXT NOT NULL,
+    "logIndex" INTEGER NOT NULL,
+    "blockTimestamp" DATETIME,
+    "payload" JSONB NOT NULL,
+    "rawArgs" JSONB NOT NULL,
+    "removed" BOOLEAN NOT NULL DEFAULT false,
+    "ingestedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 -- CreateTable
@@ -82,7 +85,13 @@ CREATE INDEX "v2_chain_events_eventName_blockNumber_idx" ON "v2_chain_events"("e
 CREATE INDEX "v2_chain_events_contractAddress_idx" ON "v2_chain_events"("contractAddress");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "v2_chain_events_chainId_blockHash_txHash_logIndex_key" ON "v2_chain_events"("chainId", "blockHash", "txHash", "logIndex");
+CREATE UNIQUE INDEX "v2_chain_events_canonical_identity_key" ON "v2_chain_events"("chainId", "releaseId", "txHash", "logIndex", "decoderVersion");
+
+-- CreateIndex
+CREATE INDEX "v2_chain_events_blockHash_idx" ON "v2_chain_events"("blockHash");
+
+-- CreateIndex
+CREATE INDEX "v2_chain_events_removed_idx" ON "v2_chain_events"("removed");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "v2_block_cursors_chainId_source_releaseId_projectionId_key" ON "v2_block_cursors"("chainId", "source", "releaseId", "projectionId");

@@ -285,8 +285,8 @@ model BlockCursor {
   processedHash   String @default("")
   safeHeight      BigInt @default(0)
   safeHash        String @default("")
-  finalizedHeight BigInt @default(0)
-  finalizedHash   String @default("")
+  finalizedHeight  BigInt @default(0)
+  finalizedHash    String @default("")
 
   // Monotonic CAS guard (PREWAVE-BE-038): the release/projection this cursor
   // belongs to, plus the deployment floor and checkpoint provenance. A writer
@@ -355,11 +355,26 @@ model ChainEvent {
   // JSON-encoded RawChainLog.rawArgs
   rawArgs         String
 
+  // Decoder version that produced this row — traceable provenance for
+  // canonical identity and replay/rollback decisions.
+  decoderVersion  String   @default("v1")
+  // Release/artifact provenance binding (fail closed on mismatch).
+  releaseId       String?
+  // Canonical identity key: chain/release/blockHash/tyHash/logIndex/decoderVersion.
+  // Enforced unique so reprocessing cannot duplicate effects.
+  canonicalKey    String   @unique
+  // Removed-log handling: when a reorg orphans this log, mark removed and
+  // route through rollback flow instead of deleting.
+  removed         Boolean  @default(false)
+  removedAt       DateTime?
   ingestedAt DateTime @default(now())
 
   @@unique([chainId, blockHash, txHash, logIndex])
   @@index([chainId, txHash, logIndex])
   @@index([eventName, blockNumber])
+  @@index([chainId, removed])
+  @@index([canonicalKey])
+  @@index([decoderVersion])
 }
 
 // ---------------------------------------------------------------------------
