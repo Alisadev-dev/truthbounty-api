@@ -65,6 +65,7 @@ const DEFAULT_MAX_ROOT_AGE_MS = 24 * 60 * 60 * 1000;
 @Injectable()
 export class WorldcoinService {
   private readonly logger = new Logger(WorldcoinService.name);
+  private readonly httpClient: SafeHttpClientService;
 
   constructor(
     @InjectRepository(WorldIdVerification)
