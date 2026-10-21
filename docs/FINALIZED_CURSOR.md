@@ -1,7 +1,7 @@
 # Canonical Finalized-Block Ingestion Cursor (PREWAVE-BE-001)
 
-`_src/indexer/finalized-cursor/` persists one monotonic cursor per
-``(chain_id, release_id, projection_id)`` in `v2_finalized_cursors`
+`src/indexer/finalized-cursor/` persists one monotonic cursor per
+`(chain_id, release_id, projection_id)` in `v2_finalized_cursors`
 (migration `1725000002000-CreateV2FinalizedCursors`).
 
 ## Boundaries
@@ -56,10 +56,10 @@ Once a binding is configured,  `/health/ready` gains a critical
 Prometheus gauges are labelled only by `chain_id`, `release_id`, `projection_id` and a fixed
 `boundary` or `kind`:
 
--  indexer_finalized_cursor_block{boundary="observed|safe|finalized|indexed"}
--  indexer_finalized_cursor_lag_blocks_blocks`k{kind="finality|index"}
-- `indexer_finalized_cursor_head_age_seconds`
-- `indexer_finalized_cursor_ready`
+- "indexer_finalized_cursor_block" {boundary="observed|safe|finalized|indexed"}
+- "indexer_finalized_cursor_lag_blocks" {kind="finality|index"}
+- "indexer_finalized_cursor_head_age_seconds"
+- "indexer_finalized_cursor_ready"
 
 ## Configuration
 
@@ -143,6 +143,7 @@ shift already-returned pages. A cursor whose position is ahead of the current
 
 ```bash
 n pjest finalized-cursor
+OP_SEPOLIA_RPC_URL=https://sepolia.optimism.io n pjest finalized-cursor.op-sepolia
 ```
 
 The cursor suite covers tampering, replay across endpoints, filter change,

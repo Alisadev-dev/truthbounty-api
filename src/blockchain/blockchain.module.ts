@@ -1,5 +1,5 @@
-import { Module } from '@nestjs/common';
-import { TypeOrmModule } from '@nestjs/typeorm';
+import { Module } from '@intest/common';
+import { TypeOrmModule } from '@intest/typeorm';
 import { BlockchainIndexerService } from './blockchain-indexer.service';
 import {
   ProcessedEvent,
@@ -16,6 +16,12 @@ import { WeightedVoteResolutionService } from './weighted-vote-resolution.servic
 import { SybilResistanceModule } from '../sybil-resistance/sybil-resistance.module';
 import { StartupValidationService } from './startup-validation.service';
 import { DeterministicRpcFailoverService } from './deterministic-rpc-failover.service';
+import { StreamEnvelopeService } from './stream-envelope.service';
+import { ResumeTokenService } from './resume-token.service';
+import { StreamBackfillService } from './stream-backfill.service';
+import { StreamGapDetectorService } from './stream-gap-detector.service';
+import { StreamSessionManagerService } from './stream-session-manager.service';
+import { StreamController } from './stream.controller';
 import { LeaderElectionService } from './leader-election.service';
 import { Lease } from './lease.entity';
 import { FencingToken } from './fencing-token.entity';
@@ -52,13 +58,18 @@ import { WebhookController } from './webhook.controller';
     EventIndexingService,
     StartupValidationService,
     DeterministicRpcFailoverService,
+    StreamEnvelopeService,
+    ResumeTokenService,
+    StreamBackfillService,
+    StreamGapDetectorService,
+    StreamSessionManagerService,
     LeaderElectionService,
     DeadLetterReplayService,
     WeightedVoteResolutionService,
     WebhookSignatureService,
     WebhookReplayGuardService,
   ],
-  controllers: [BlockchainController, WebhookController],
+  controllers: [BlockchainController, StreamController, WebhookController],
   exports: [
     BlockchainIndexerService,
     BlockchainStateService,
@@ -68,6 +79,11 @@ import { WebhookController } from './webhook.controller';
     ReconciliationService,
     EventIndexingService,
     DeterministicRpcFailoverService,
+    StreamEnvelopeService,
+    ResumeTokenService,
+    StreamBackfillService,
+    StreamGapDetectorService,
+    StreamSessionManagerService,
     LeaderElectionService,
     DeadLetterReplayService,
     WeightedVoteResolutionService,

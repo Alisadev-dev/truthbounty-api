@@ -50,8 +50,16 @@ export class ProcessedEvent {
    * state mutation this event applied (e.g. the Transfer amounts). Nullable for
    * backwards compatibility with rows written before this column existed.
    */
-  @Column({name: 'payload', type: 'simple-json', nullable: true})
-  payload: Record<string, any> | null;
+  @Column({ name: 'payload', type: 'simple-json', nullable: true })
+  payload: Record<string, unknown> | null;
+
+  /**
+   * Monotonic cursor assigned at ingestion time. Used to build opaque resume
+   * tokens and to detect gaps/duplicates on WebSocket reconnect.
+   */
+  @Column({ name: 'cursor', type: 'bigint', nullable: true })
+  @Index()
+  cursor: number | null;
 
   /**
    * Set when the chain reports this log as removed (e.g. a reorg or a filter delivering
