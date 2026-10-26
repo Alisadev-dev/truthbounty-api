@@ -7,16 +7,13 @@ generator client {
   binaryTargets = ["native", "linux-musl"]
 }
 
-// Actual runtime datasource is SQLite via the libsql driver adapter
-// (see src/prisma/prisma.service.ts, DATABASE_URL="file:./dev.db") this 
-// matches prisma/migrations/migration_lock.toml, which already records
-// "sqlite" as the migration dialect. Declaring "postgresql" here caused
- // PrismaClientInitializationError at runtime ("Driver Adapter
-// @prisma/adapter-libsql, based on sqlite, is not compatible with the
-// provider postgress") once the client was regenerated against the
-// package-lock-pinned prisma@7.4.1, which validates this consistency.
+// Canonical persistence authority: PostgreSQL via Prisma (STAB-BE-006).
+// The libsql/SQLite adapter path has been retired; DATABASE_URL is the
+// single production URL and prisma/migrations is the sole migration
+// authority. Do not reintroduce a second ORM or dialect here.
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
 }
 
 enum UserRole {
@@ -181,7 +178,7 @@ model AnalyticsEvent {
   userId    String?
   data        Json?
   occurredAt  DateTime @default(now())
-  createdAt  DateTime @default(now())
+  createdAt   DateTime @default(now())
 
   @@index([eventType, occurredAt])
   @@index([entityType, entityId])
@@ -232,9 +229,9 @@ model MonitoringMetric {
   @@index([name, recordedAt])
 }
 
-// ----------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
 // Transactional Outbox (V2-BE-048)
-// ----------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
 // OutboxEvent rows are written inside the same DB transaction as any
 // projection change. A background poller claims PENDING rows and relays
 // them to BullMQ, then marks them DISPATCHED.  The processor enforces
@@ -243,7 +240,7 @@ model MonitoringMetric {
 // Security: payload stores only non-sensitive routing metadata (aggregateId,
 // eventType, recipientIds). No private claim text, user PII, or settlement
 // data is persisted here.
-// ----------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
 model OutboxEvent {
   id             String   @id @default(uuid())
   // Domain event type, e.g. "notification.send", "webhook.deliver"
@@ -254,7 +251,7 @@ model OutboxEvent {
   payload        String   // JSON-encoded OutboxEventPayload
   // Stable key used by the processor for exactly-once delivery
   idempotencyKey String   @unique
-  status         String   @default("PENDING") // PENDING | DISPATCHED | DEAD_LETTER
+  status         String   @default("PENDING") // PENDING | DISAPTCHED | DEAD_LETTER
   // BullMQ job id once dispatched (for observability)
   jobId          String?
   retryCount     Int      @default(0)
@@ -262,8 +259,8 @@ model OutboxEvent {
   lastError      String?
   scheduledAt    DateTime @default(now())
   processedAt    DateTime?
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
 
   @@index([status, scheduledAt])
   @@index([aggregateId])
@@ -271,12 +268,12 @@ model OutboxEvent {
   @@index([eventType, status])
 }
 
-// ----------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
 // V2 indexer: block cursor + reorg ancestry
 // Supports src/v2/block-cursor (reorg detection y walking parentHash back to
 // a common ancestor). Heights are BigInt because some EVM chains exceed
 // Number.MAX_SAFE_INTEGER.
-// ----------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
 
 model BlockCursor {
   id     String @id @default(uuid())
@@ -288,16 +285,28 @@ model BlockCursor {
   processedHash   String @default("")
   safeHeight      BigInt @default(0)
   safeHash        String @default("")
-  finalizedHeight BigInt @default(0)
-  finalizedHash   String @default("")
+  finalizedHeight  BigInt @default(0)
+  finalizedHash    String @default("")
+
+  // Monotonic CAS guard (PREWAVE-BE-038): the release/projection this cursor
+  // belongs to, plus the deployment floor and checkpoint provenance. A writer
+  // may only advance the cursor when its (releaseId, projection) matches and
+  // its height is strictly greater than processedHeight.
+  releaseId       String @default("")
+  projection      String @default("")
+  deploymentBlock BigInt @default(0)
+  artifactChecksum String @default("")
+  artifactChecksum String @default("")
+  checkpointSource String @default("")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   ancestors BlockCursorAncestor[]
 
-  @@unique([chainId, source])
+  @@unique([chainId, source, releaseId, projection])
   @@index([chainId])
+  @@index([chainId, releaseId, projection])
 }
 
 model BlockCursorAncestor {
@@ -312,19 +321,23 @@ model BlockCursorAncestor {
   confirmation String    @default("observed")
   // False once this height is known to belong to an orphaned branch
   isCanonical Boolean   @default(true)
+  // Provenance of the checkpoint that produced this ancestor row.
+  releaseId       String @default("")
+  artifactChecksum String @default("")
 
   createdAt DateTime @default(now())
 
   @@unique([cursorId, height, hash])
   @@index([cursorId, isCanonical])
+  @@index([cursorId, releaseId])
 }
 
-// ----------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
 // V2 indexer: canonical-identity dedup for raw EVM logs.
 // A replay of the same (chainId, blockHash, txHash, logIndex) is rejected;
 // the same log position under a different block hash is retained so reorgs
 // stay diagnosable.
-// ----------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
 
 model ChainEvent {
   id              String   @id @default(uuid())
@@ -342,11 +355,133 @@ model ChainEvent {
   // JSON-encoded RawChainLog.rawArgs
   rawArgs         String
 
+  // Decoder version that produced this row — traceable provenance for
+  // canonical identity and replay/rollback decisions.
+  decoderVersion  String   @default("v1")
+  // Release/artifact provenance binding (fail closed on mismatch).
+  releaseId       String?
+  // Canonical identity key: chain/release/blockHash/tyHash/logIndex/decoderVersion.
+  // Enforced unique so reprocessing cannot duplicate effects.
+  canonicalKey    String   @unique
+  // Removed-log handling: when a reorg orphans this log, mark removed and
+  // route through rollback flow instead of deleting.
+  removed         Boolean  @default(false)
+  removedAt       DateTime?
   ingestedAt DateTime @default(now())
 
   @@unique([chainId, blockHash, txHash, logIndex])
   @@index([chainId, txHash, logIndex])
   @@index([eventName, blockNumber])
+  @@index([chainId, removed])
+  @@index([canonicalKey])
+  @@index([decoderVersion])
+}
+
+// ---------------------------------------------------------------------------
+// PREWAVE-BE-008: Resumable WebSocket streams with backfill tokens.
+//
+// A StreamSession is opened by a client subscribing to a projection stream.
+// Each delivered envelope is persisted as a StreamEvent so that a reconnect
+// can be resumed from an opaque resume token. Resume tokens are stored
+// hashed (never the raw token) and are bound to chain/release/block/
+// projection version so that a wrong-release or wrong-chain resume fails
+// closed. Backfill is served from StreamEvent rows within a bounded window.
+//
+// Security: envelopes carry only routing metadata and a projection payload
+// reference — no secrets, authorization material, or protected rationale.
+// ---------------------------------------------------------------------------
+
+model StreamSession {
+  id String @id @default(uuid())
+
+  // Chain-derived binding — every session is pinned to a single chain,
+  // release, deployment block, and artifact checksum.
+  chainId          Int
+  releaseId        String
+  deploymentBlock  BigInt
+  artifactChecksum String
+
+  // Logical projection stream, e.g. "claims", "rewards"
+  projection       String
+  projectionVersion Int
+
+  // Opaque resume token, stored hashed. Raw token is only returned to client.
+  resumeTokenHash String @unique
+  // When the current resume token expires; expired tokens force bounded resync.
+  resumeTokenExpiresAt DateTime
+
+  // Last event successfully acknowledged by the client (cursor).
+  lastAckedEventId String?
+  lastAckedCursor  BigInt @default(0)
+
+  // Lifecycle: ACTIVE | CLOSED | EXPIRED | RESYNC_REQUIRED
+  status String @default("ACTIVE")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  events StreamEvent[]
+
+  @@index([chainId, releaseId, projection])
+  @@index([status, resumeTokenExpiresAt])
+  @@index([resumeTokenHash])
+}
+
+model StreamEvent {
+  id String @id @default(uuid())
+
+  sessionId String
+  session   StreamSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  // Monotonic per-session cursor used for gap/duplicate detection.
+  cursor BigInt
+
+  // Versioned envelope fields (see stream-envelope.types.ts).
+  envelopeVersion   Int
+  eventId           String
+  chainId           Int
+  releaseId         String
+  blockNumber       BigInt
+  blockHash         String
+  freshness         String // "observed" | "safe" | "finalized"
+  projectionVersion Int
+
+  // Reference to the canonical read-model row this envelope projects.
+  // The actual payload is resolved from the canonical read model on
+  // delivery — never stored inline here.
+  projectionRef String
+
+  // JSON-encoded routing metadata only (no protected payload).
+  metadata String @default("{}")
+
+  // Delivery state for backfill and idempotency.
+  deliveredAt DateTime?
+  createdAt   DateTime @default(now())
+
+  @@unique([sessionId, cursor])
+  @@unique([sessionId, eventId])
+  @@index([sessionId, cursor])
+  @@index([chainId, releaseId, blockNumber])
+}
+
+model StreamBackfillRequest {
+  id String @id @default(uuid())
+
+  sessionId String
+
+  // Bounded backfill window requested by the client.
+  fromCursor BigInt
+  toCursor   BigInt
+
+  // Outcome: PENDING | SERVED | REJECTED_GAP | REJECTED_EXPIRED | REJECTED_RELEASE
+  status String @default("PENDING")
+  reason String?
+
+  requestedAt DateTime @default(now())
+  servedAt    DateTime?
+
+  @@index([sessionId, requestedAt])
+  @@index([status])
 }
 
 // ---------------------------------------------------------------------------
@@ -484,7 +619,7 @@ model FeatureFlagAuditEvent {
 // persistence or forwarding. High-confidence detections are quarantined
 // here instead of being stored inline, and access is restricted/audited.
 // Detected secret material is never echoed into logs/notifications.
-// ----------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
 
 model SupportSubmission {
   id        String   @id @default(uuid())
@@ -496,81 +631,74 @@ model SupportSubmission {
 
   // Sanitized/redacted text safe for persistence and forwarding.
   sanitizedText String @default("")
-
-  // Quarantine status for this submission.
-  // clean | quarantined | released
-  status String @default("clean")
-
-  // High-confidence detection count (secret material redacted before storage).
-  detectionCount Int @default(0)
-
-  // Detection categories found (JSON array of classifier labels, no secret values).
-  detectionTypes String @default("[]")
-
-  // Opaque reference to quarantined attachment blob, if any.
-  quarantineRef String?
-
-  // Secure remediation guidance surfaced to the user (no secret material).
-  remediationGuidance String?
-
-  // Audit trail for quarantine access.
-  quarantinedAt DateTime?
-  reviewedBy    String?
-  reviewedAt    DateTime?
-
-  attachments SupportAttachment[]
-
-  @@index([status, createdAt])
-  @@index([userId])
 }
 
-model SupportAttachment {
-  id           String   @id @default(uuid())
-  createdAt      DateTime @default(now())
+// ---------------------------------------------------------------------------
+// PREWAVE-BE-049: Dead-letter replay authorization + idempotency.
+// Replay is denied by default. Each authorized replay is bound to the
+// original dead-letter record via an immutable reference, requires a
+// protected capability, reason, bounds, dry-run flag, original payload
+// hash, and an audit record. Replays are rejected across release/schema
+// incompatibility and duplicate replays of the same original are blocked.
+// ---------------------------------------------------------------------------
 
-  submissionId String
-  submission   SupportSubmission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
-
-  // Original filename (not trusted for path resolution).
-  filename     String
-  // MIME type as declared by the client.
-  contentType  String
-  // Size in bytes.
-  size         Int
-
-  // Sha256 of the attachment content for deduplication and integrity.
-  contentHash  String
-
-  // Storage key for the quarantined blob (never inline in this row).
-  quarantineKey String?
-
-  // clean | quarantined | released
-  status        String @default("clean")
-
-  // Detection categories (JSON array of classifier labels, no secret values).
-  detectionTypes String @default("[]")
-
-  @@index([submissionId])
-  @@index([contentHash])
-  @@index([status])
-}
-
-model QuarantineAuditLog {
+model DeadLetterReplay {
   id        String   @id @default(uuid())
-  createdAt  DateTime @default(now())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  // Opaque actor reference (user id or system actor).
-  actorId    String?
-  // read | release | delete | create
-  action      String
-  // Opaque reference to the quarantined record (submission or attachment).
-  targetType  String
-  targetId    String
-  // Non-sensitive context (JSON); never contains secret material.
-  context     String @default("{}")
+  // Immutable reference to the original dead-letter record.
+  originalDeadLetterId String
+  // SHA-256 of the original payload; replay must match this exactly.
+  originalPayloadHash  String
+  // Chain/release binding — replay is rejected if any of these drift.
+  chainId              Int
+  releaseId            String
+  deploymentBlock      BigInt
+  artifactChecksum     String
 
-  @@index([targetType, targetId])
-  @@index([actorId, createdAt])
+  // Operator-supplied authorization context.
+  capability           String
+  reason               String
+  requestedBy          String
+  dryRun               Boolean  @default(true)
+
+  // Bounded batch execution.
+  batchId              String?
+  batchSize            Int      @default(1)
+  batchOffset          Int      @default(0)
+
+  // Lifecycle: PENDING | AUTHORIZED | RUNNING | PAUSED | COMPLETED | FAILED | REJECTED
+  status               String   @default("PENDING")
+  // Idempotency key derived from (originalDeadLetterId, originalPayloadHash).
+  idempotencyKey       String   @unique
+  // Set once a replay has produced effects; prevents duplicate effects.
+  effectAppliedAt      DateTime?
+  lastError            String?
+
+  auditRecords DeadLetterReplayAudit[]
+
+  @@unique([originalDeadLetterId, originalPayloadHash])
+  @@index([status, createdAt])
+  @@index([batchId])
+  @@index([chainId, releaseId])
+}
+
+model DeadLetterReplayAudit {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+
+  replayId String
+  replay   DeadLetterReplay @relation(fields: [replayId], references: [id], onDelete: Cascade)
+
+  // Actor + action for immutable audit trail.
+  actor     String
+  action    String
+  // JSON-encoded structured detail; never contains private payload data.
+  detail    String   @default("{}")
+
+  @@index([replayId, createdAt])
+  @@index([actor])
 }
 
 // ----------------------------------------------------------------------------
@@ -607,7 +735,9 @@ model WebhookProviderConfig {
   // JSON array of opaque secret refs retained for rotation grace windows.
   rotatedSecretRefs String @default("[]")
 
-  deliveries WebhookDelivery[]
+  // Deliveries are intentionally not a Prisma relation: WebhookDelivery.provider
+  // is a denormalized audit key (see that model), and runtime persistence goes
+  // through TypeORM. A one-sided relation here fails prisma generate (P1012).
 
   @@index([isActive])
 }

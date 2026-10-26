@@ -64,8 +64,9 @@ function buildOptions(): DataSourceOptions {
       // apply identical fail-closed bounds (pool size, acquisition timeout,
       // statement timeout, idle-in-transaction timeout).
       extra: {
-        maxRetries: parseInt(env.DB_POOL_RETRIES ?? '3', 10),
-        retryDelay: parseInt(env.DB_POOL_RETRY_DELAY ?? '1000', 10),
+        // Retry strategy (non-pg pool keys retained for compatibility)
+        maxRetries: Number.parseInt(env.DB_POOL_RETRIES ?? '3', 10),
+        retryDelay: Number.parseInt(env.DB_POOL_RETRY_DELAY ?? '1000', 10),
         ...buildPoolExtra(buildPoolConfig(env)),
       },
     };

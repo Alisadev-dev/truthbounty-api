@@ -1,13 +1,12 @@
 import { getNestRuntimeConfig } from './config/runtime-config';
 import { Module, Logger } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
-import { EnvironmentValidationService } from './config/environment-validation.service';
 import { BullModule } from '@nestjs/bullmq';
 import { BullBoardModule } from '@bull-board/nestjs';
 import { ExpressAdapter } from '@bull-board/express';
 import { ScheduleModule } from '@nestjs/schedule';
 import { ThrottlerModule } from '@nestjs/throttler';
-import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
+import { APP_GUARD, APP_INTERCEPTOR, DiscoveryModule } from '@nestjs/core';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { RewardsModule } from './rewards/rewards.module';
@@ -15,7 +14,6 @@ import blockchainConfig from './config/blockchain.config';
 import sybilConfig from './config/sybil.config';
 import finalityPolicyConfig from './config/finality-policy.config';
 import { FinalityPolicyModule } from './config/finality-policy.module';
-import { DatabaseModule } from './database/database.module';
 import { BlockchainModule } from './blockchain/blockchain.module';
 import { IdentityModule } from './identity/identity.module';
 import { PrismaModule } from './prisma/prisma.module';
@@ -67,6 +65,8 @@ import { V2OutboxModule } from './v2/outbox/v2-outbox.module';
 import { CredentialRotationModule } from './security/credential-rotation.module';
 import { OperationsModule } from './operations/operations.module';
 import { WebhooksModule } from './webhooks/webhooks.module';
+import { GracefulShutdownModule } from './common/lifecycle/graceful-shutdown.module';
+import { GracefulShutdownService } from './common/lifecycle/graceful-shutdown.service';
 import { NotificationsModule as OutboundWebhooksNotificationsModule } from './notifications/notifications.module';
 import { AbuseSignalsModule } from './abuse-signals/abuse-signals.module';
 import { AbuseSignalInterceptor } from './abuse-signals/abuse-signal.interceptor';
@@ -169,6 +169,11 @@ class ThrottlerRedisStorage {
   constructor(redis: any) {
     this.redis = redis;
     this.logger.log('Using Redis storage for rate limiting (production mode)');
+  }
+
+  async close(): Promise<void> {
+    await this.redis.quit();
+    this.logger.log('Rate-limit Redis connection closed');
   }
 
   async increment(
@@ -303,22 +308,28 @@ async function createThrottlerStorage(
     }),
     FinalityPolicyModule,
     ScheduleModule.forRoot(),
+    DiscoveryModule,
+    GracefulShutdownModule,
     // Idempotency Module
     // Provides idempotency key handling for safe commands
     IdempotencyModule,
-    // PostgreSQL Database Infrastructure (Issue #269)
-    // DatabaseModule provides:
-    // - PostgreSQL connectivity with connection pooling
-    // - Transaction management via TransactionRunner
-    // - Health reporting via DatabaseService
-    // - Repository base class for all domain repositories
-    // Falls back to SQLite when DATABASE_URL is not set (development).
-    DatabaseModule,
+    // STAB-BE-006: Prisma/PostgreSQL is the single persistence authority.
+    // The former TypoORM DatabaseModule (SQLite/PostgreSQL dual path) has
+    // been removed; all repositories and transactions flow through Prisma.
+    PrismaModule,
     ThrottlerModule.forRootAsync({
       imports: [ConfigModule],
-      inject: [ConfigService],
-      useFactory: async (configService: ConfigService) => {
+      inject: [ConfigService, GracefulShutdownService],
+      useFactory: async (
+        configService: ConfigService,
+        gracefulShutdown: GracefulShutdownService,
+      ) => {
         const storage = await createThrottlerStorage(configService);
+        if (storage instanceof ThrottlerRedisStorage) {
+          gracefulShutdown.registerStopHook('throttler-redis', () =>
+            storage.close(),
+          );
+        }
         return {
           throttlers: [
             {
@@ -352,7 +363,6 @@ async function createThrottlerStorage(
     AuthModule,
     BlockchainModule,
     IdentityModule,
-    PrismaModule,
     RewardsModule,
     SybilResistanceModule,
     AggregationModule,
@@ -389,6 +399,7 @@ async function createThrottlerStorage(
     RealtimeModule,
     StakingModule,
     IndexerModule,
+    // V2-BE-113: Transactional outbox (now Prisma-backed)
     V2OutboxModule,
     CredentialRotationModule,
     // UX-BE-004 (#59
@@ -414,12 +425,20 @@ async function createThrottlerStorage(
       useClass: AuditLoggingInterceptor,
     },
     {
-      provide: APP_INTERCEPTOR,
-      useClass: AuditLoggingInterceptor,
+      provide: APP_GUARD,
+      useClass: IdempotencyGuard,
+    },
+    {
+      provide: APP_GUARD,
+      useClass: WalletThrottlerGuard,
     },
     {
       provide: APP_INTERCEPTOR,
       useClass: LoggingInterceptor,
+    },
+    {
+      provide: APP_INTERCEPTOR,
+      useClass: AuditLoggingInterceptor,
     },
     {
       provide: APP_INTERCEPTOR,

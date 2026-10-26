@@ -1,4 +1,3 @@
-
 # TruthBounty API Documentation
 
 This document provides a comprehensive reference for all API endpoints in the TruthBounty API. TruthBounty is a decentralized news verification infrastructure that allows users to submit claims, provide evidence, resolve disputes, and earn rewards.
@@ -44,7 +43,7 @@ Manage claims and their evidence.
 | GET | `/claims/evidence/:evidenceId` | Get a single evidence by ID |
 
 **Query Parameters:**
-- `limit` (optional): Number of results to return (default: 10)
+- "limit" (optional): Number of results to return (default: 10)
 
 **Path Parameters:**
 - `:wallet` - Wallet address
@@ -92,7 +91,7 @@ Manage evidence with flagging capabilities.
 ```
 
 **Query Parameters:**
--  `admin` - Set to `true` to access flags (admin only)
+- "admin" - Set to `true` to access flags (admin only)
 
 ---
 
@@ -115,8 +114,8 @@ Create and resolve disputes.
 - `:claimId` - Claim ID
 
 **Query Parameters:**
-- `status` - Filter by dispute status
--  `trigger` - Filter by dispute trigger
+- "status" - Filter by dispute status
+- "trigger" - Filter by dispute trigger
 
 **Request Body (POST /disputes):**
 ```json
@@ -163,7 +162,7 @@ User and wallet identity management.
 **Path Parameters:**
 - `:id` - User ID
 - `:chain` - Blockchain chain (e.g., ethereum, solana)
-- `:address` - Wallet address
+-  `:address` - Wallet address
 
 **Request Body (POST /identity/users/:id/wallets):**
 ```json
@@ -271,7 +270,7 @@ Blockchain event indexing and state management.
 | POST | `/api/v1/blockchain/votes/simulate` | Simulate claim resolution |
 
 **Path Parameters:**
-- `:eventId` - Event ID
+-  `:eventId` - Event ID
 - `:blockNumber` - Block number
 
 **Request Body (POST /api/v1/blockchain/blocks/process):**
@@ -350,7 +349,7 @@ Reward management.
 | DELETE | `/rewards/:id` | Delete reward |
 
 **Path Parameters:**
-- `:id` - Reward ID
+-  `:id` - Reward ID
 
 ---
 
@@ -363,7 +362,7 @@ User leaderboard rankings.
 | GET | `/leaderboard` | Get leaderboard rankings |
 
 **Query Parameters:**
--  `type` - Leaderboard type: `global` or `weekly` (default: `global`)
+- "type" - Leaderboard type: `global` or `weekly` (default: `global`)
 
 ---
 
@@ -381,18 +380,18 @@ Audit log retrieval.
 | GET | `/audit/summary` | Get audit summary for an entity type |
 
 **Path Parameters:**
--  `:entityType` - Entity type (e.g., CLAIM, USER, DISPUTE)
--  `:entityId` - Entity ID
+- `:entityType` - Entity type (e.g., CLAIM, USER, DISPUTE)
+- `:entityId` - Entity ID
 -  `:userId` - User ID
 - `:actionType` - Action type (e.g., CLAIM_CREATED, EVIDENCE_ADDED)
 
 **Query Parameters:**
--  `entityType` - Filter by entity type
--  `actionType` - Filter by action type
--  `userId` - Filter by user ID
--  `limit` - Number of results (default: 100, max: 500)
--  `offset` - Offset for pagination
--  `days` - Number of days for summary (default: 7)
+- "entityType" - Filter by entity type
+- "actionType" - Filter by action type
+- "userId" - Filter by user ID
+- "limit" - Number of results (default: 100, max: 500)
+- "offset" - Offset for pagination
+- "days" - Number of days for summary (default: 7)
 
 ---
 
@@ -497,3 +496,79 @@ Signed inbound webhook delivery from external providers. All requests are verifi
 
 ---
 
+### AI Assistant
+
+Conversational AI assistance over protocol knowledge, with context retrieval, streaming, safety guardrails, and usage analytics. All routes require a JWT (`Authorization: Bearer <token>`), including GEts — conversations are private per user. Responses are wrapped in a standard envelope: `{ success, requestId, timestamp, data, error, meta? }`. Full request/response schemas are in Swagger UI.
+
+---
+
+## Claim Lifecycle Errors (V1)
+
+Claim lifecycle operations fail closed with stable, versioned, typed error codes. Clients MUST switch on the code field and MuST NOT parse human-readable messages. Internal details (SQL / stack traces / raw chain payloads) iss never returned.
+
+### Error Envelope
+
+All claim lifecycle errors return the standard envelope with a typed error object:
+
+```json
+{
+  "success": false,
+  "requestId": "string",
+  "timestamp": "ISO-8601 string",
+  "data": null,
+  "error": {
+    "code": "CANONICAL_CLAIM_NOT_FOUND",
+    "code": "CANONICAL_CLAIM_NOT_FOUND",
+    "version": "v1",
+    "message": "Claim not found",
+    "details": {
+      "claimId": "string",
+      "chainId": "number",
+      "releaseId": "string",
+      "deploymentBlock": "number",
+      "artifactChecksum": "string"
+    },
+    "retryable": false
+  }
+}
+```
+
+### Error Codes
+
+All codes are prefixed and versioned (`v1`). The code is stable across patch releases; changes to code semantics require a new version prefix.
+
+| HTTP Status | Code | Meaning | Retryable |
+|-------------|------|---------|----------|
+| 404 | `CANONICAL_CLAIM_NOT_FOUND` | Claim does not exist in canonical state for the bound chain / release / deployment block | false |
+| 403 | `CANONICAL_CLAIM_FORBIDDEN` | Actor is not authorized to perform the transition on this claim | false |
+| 409 | `CANONICAL_CLAIM_WRONG_PHASE` | Requested transition is not valid from the claim's current phase | false |
+| 409 | `CANONICAL_CLAIM_DUPLICATE` | Idempotent retry detected an equivalent prior transition with differing payload | false |
+| 409 | `CANONICAL_CLAIM_INVALID_TRANSITION` | Transition is not permitted by the canonical contract state machine | false |
+| 410 | `CANONICAL_CLAIM_STALE_PROJECTION` | Read or write targeted a stale projection (event not yet canonical at the bound deployment block) | true |
+| 410 | `CANONICAL_CLAIM_REORGED` | The claim was affected by a chain reorg and must be re-resolved from canonical events | true |
+| 503 | `CANONICAL_CLAIM_UNAVAILABLE` | Canonical state is temporarily unavailable (indexer catching up or chain REC failure) | true |
+
+### Error Details Contract
+
+The `details` object is stable and contains only non-sensitive, chain-bound identifiers:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `claimId` | string | Claim identifier |
+| `chainId` | number | Chain ID the claim is bound to |
+| `releaseId` | string | Contract release ID |
+| `deploymentBlock` | number | Deployment block number |
+| `artifactChecksum` | string | Artifact checksum the state was derived from |
+| `currentPhase` | string (optional) | Canonical phase at time of error (wrong-phase / invalid-transition only) |
+
+Internal details (SQL errors, stack traces, raw event payloads, addresses of non-canonical blocks) are never included.
+
+### Idempotent Retry Semantics
+
+Clients MAY retry any error with `retryable: true` using the same request body and idempotency key. The server MUST return the canonical result of the original transition if it already committed. Divergent payloads for the same idempotency key return `CANONICAL_CLAIM_DUPLICATE`.
+
+### State Transition Authority
+
+State transitions are derived exclusively from canonical contracts and finalized events. Client-supplied phase or state values are ignored for authority purposes and are only used for conflict detection.
+
+---

@@ -42,6 +42,65 @@ export type EnvironmentMode = 'local' | 'development' |
   'test' | 'staging' | 'production';
 
 /**
+ * A single block cursor checkpoint recorded for a chain/release/projection
+ * combination. This is the authoritative state that monotonic compare-and-swap
+ * advancement is performed against.
+ */
+export interface BlockCursorCheckpoint {
+  chainId: number;
+  releaseId: string;
+  projection: string;
+  blockHeight: number;
+  blockHash: string;
+  finalizedHead: number;
+  deploymentBlock: number;
+  artifactChecksum: string;
+  /** Monotonically increasing version for optimistic concurrency. */
+  version: number;
+  /** When true this checkpoint was produced by an authorized rollback. */
+  rollback?: boolean;
+  /** Audit metadata for the checkpoint (provenance). */
+  provenance?: {
+    writerId?: string;
+    reason?: string;
+    authorizedBy?: string;
+    timestamp?: string;
+  };
+}
+
+/**
+ * Result of a compare-and-swap attempt to advance the block cursor.
+ */
+export interface CursorAdvanceResult {
+  advanced: boolean;
+  reason?: string;
+  current: BlockCursorCheckpoint | null;
+  next?: BlockCursorCheckpoint;
+}
+
+/**
+ * Request to advance the block cursor for a given chain/release/projection.
+ */
+export interface CursorAdvanceRequest {
+  chainId: number;
+  releaseId: string;
+  projection: string;
+  blockHeight: number;
+  blockHash: string;
+  finalizedHead: number;
+  deploymentBlock: number;
+  artifactChecksum: string;
+  /** Optimistic concurrency guard: expected current version. */
+  expectedVersion?: number;
+  /** Writer identity for auditability. */
+  writerId?: string;
+  /** If true, this is an explicit rollback (must be authorized). */
+  rollback?: boolean;
+  /** Rollback authorization token / reason. */
+  rollbackAuthorization?: string;
+}
+
+/**
  * Result of validating the realtime configuration at startup.
  */
 export interface RealtimeConfigValidationResult {
@@ -132,6 +191,11 @@ export interface ReadinessPolicy {
  * required release data is absent or inconsistent, and keeps local dev
  * explicit and visibly non-production.
  *
+ * PREWAVE-BE-038 extends this with monotonic block cursor compare-and-swap
+ * enforcement: cursor advancement is atomic per chain/release/projection,
+ * stale writers are rejected, hash disagreement fails closed, and rollbacks
+ * are separately authorized and audited.
+ *
  * PREWAVE-BE-035 extends this to validate the realtime configuration
  * (stream origins, topics, retention, heartbeat, payload limits, supported
  * release) and to authorize subscription topics per principal/capability.
@@ -153,6 +217,28 @@ export interface ReadinessPolicy {
 @Injectable()
 export class StartupValidationService {
   private readonly logger = new Logger(StartupValidationService.name);
+
+  /**
+   * In-memory authoritative cursor state, keyed by chain/release/projection.
+   * This is the compare-and-swap target; in a persistent deployment this
+   * would be backed by a transactional store, but the monotonic invariants
+   * are enforced here regardless of the backing store.
+   */
+  private readonly cursors = new Map<string, BlockCursorCheckpoint>();
+
+  /** Serializes concurrent advance attempts per cursor key. */
+  private readonly cursorLocks = new Map<string, Promise<void>>();
+
+  /** Audit trail of cursor mutations (including rollbacks). */
+  private readonly cursorAuditLog: Array<{
+    key: string;
+    previous: BlockCursorCheckpoint | null;
+    next: BlockCursorCheckpoint;
+    rollback: boolean;
+    writerId?: string;
+    reason?: string;
+    timestamp: string;
+  }> = [];
 
   /** Latest readiness observation, if any. */
   private readinessObservation: ReadinessObservation | null = null;
@@ -192,7 +278,7 @@ export class StartupValidationService {
     const contracts = this.getContracts();
     if (contracts.length === 0 && !isLocal) {
       errors.push(
-        'INDEXED_CONTRACTS is empty; indexer configuration cannot start outside explicit local mode',
+        'INDEXED CONTRACTS is empty; indexer configuration cannot start outside explicit local mode',
       );
     }
     for (const contract of contracts) {
@@ -242,7 +328,7 @@ export class StartupValidationService {
 
     if (!contract.address) {
       errors.push('missing address');
-    } else if (!/^0x[a-fA-F0-9]{40}$/.test(contract.address)) {
+    } else if (!/^0x[aA-fA-f0-9]{40}$/.test(contract.address)) {
       errors.push(`address "${contract.address}" is not a valid 20-byte hex`);
     } else {
       try {
@@ -298,19 +384,15 @@ export class StartupValidationService {
     isLocal: boolean,
   ): string[] {
     const errors: string[] = [];
-
     if (!manifest) {
       if (!isLocal) {
-        errors.push(
-          'Canonical release manifest is missing or unreadable; required outside local mode',
-        );
+        errors.push('release manifest is required outside local mode');
       }
       return errors;
     }
 
-    // Release ID must be a non-empty string.
-    if (!manifest.releaseId || typeof manifest.releaseId !== 'string') {
-      errors.push('Release manifest is missing a valid releaseId');
+    if (!manifest.releaseId) {
+      errors.push('release manifest is missing releaseId');
     }
 
     // Chain ID must match the configured chain ID.
@@ -374,33 +456,30 @@ export class StartupValidationService {
     contracts: ContractConfig[],
   ): string[] {
     const errors: string[] = [];
-    const manifestContracts = Array.isArray(manifest.contracts)
-      ? manifest.contracts
-      : [];
+    const configChainId = Number(this.configService.get('BLOCKCHAIN_CHAIN_ID') ?? 0);
+    if (configChainId > 0 && configChainId !== manifest.chainId) {
+      errors.push(
+        `configured chainId ${configChainId} does not match release manifest chainId ${manifest.chainId}`,
+      );
+    }
 
-    const byName = new Map<string, ReleaseManifestContract>();
-    for (const mc of manifestContracts) {
-      if (!mc.name) {
-        errors.push('Release manifest contains a contract without a name');
-        continue;
-      }
-      if (byName.has(mc.name)) {
-        errors.push(`Release manifest declares duplicate contract "${mc.name}"`);
-        continue;
-      }
-      byName.set(mc.name, mc);
+    const manifestByAddress = new Map<string, ReleaseManifestContract>();
+    for (const mc of manifest.contracts) {
+      manifestByAddress.set(mc.address.toLowerCase(), mc);
     }
 
     for (const contract of contracts) {
-      const name = contract.name ?? contract.address;
-      const mc = byName.get(name);
+      const mc = manifestByAddress.get(contract.address.toLowerCase());
       if (!mc) {
-        errors.push(`Contract "${name}" is not declared in the release manifest`);
+        errors.push(
+          `contract "${contract.name}" (${contract.address}) absent from release manifest`
+        );
         continue;
       }
-      if (mc.address && contract.address && mc.address.toLowerCase() !== contract.address.toLowerCase()) {
+      if (mc.checksum && contract.artifactChecksum &&
+        mc.checksum.toLowerCase() !== contract.artifactChecksum.toLowerCase()) {
         errors.push(
-          `Contract "${name}" address (${contract.address}) does not match release manifest (${mc.address})`,
+          `contract "${contract.name}" artifact checksum disagrees with release manifest`,
         );
       }
     }
@@ -408,41 +487,44 @@ export class StartupValidationService {
   }
 
   /**
-   * Network-backed chain ID and contract code checks.
+   * Network-backed validation: chain ID and contract code presence.
    */
   private async validateChainAndCode(contracts: ContractConfig[]): Promise<string[]> {
     const errors: string[] = [];
-    const rpcUrl = this.configService.get<string>('blockchain.rpcUrl');
+    const rpcUrl = this.configService.get<string>('BLOCKCHAIN_RPC_URL');
     if (!rpcUrl) {
-      errors.push('blockchain.rpcUrl is not configured');
+      errors.push('BLOCKCHAIN_RPC_URL is required for startup R-PC checks');
       return errors;
     }
 
+    let provider: ethers.JsonRpcProvider;
     try {
-      const provider = new ethers.JsonRpcProvider(rpcUrl);
+      provider = new ethers.JsonRpcProvider(rpcUrl);
       const network = await provider.getNetwork();
-      const configuredChainId = this.configService.get<number>('blockchain.chainId');
-      if (configuredChainId !== undefined && configuredChainId !== null) {
-        if (Number(network.chainId) !== Number(configuredChainId)) {
-          errors.push(
-            `RPC chainId (${network.chainId}) does not match configured chainId (${configuredChainId})`,
-          );
-        }
+      const configChainId = Number(this.configService.get('BLOCKCHAIN_CHAIN_ID')??0);
+      if (configChainId > 0 && Network.chainId !== configChainId) {
+        errors.push(
+          `RPC chainId ${network.chainId} does not match configured chainId ${configChainId}`,
+        );
       }
+    } catch (err) {
+      errors.push(`Failed to connect to RPC ${rpcUrl}: ${String(err)}`);
+      return errors;
+    }
 
-      for (const contract of contracts) {
-        if (!contract.address) {
-          continue;
-        }
+    for (const contract of contracts) {
+      try {
         const code = await provider.getCode(contract.address);
         if (!code || code === '0x') {
           errors.push(
-            `Contract "${contract.name ?? contract.address}" has no code at ${contract.address}`,
+            `contract "${contract.name}" (${contract.address}) has no code at configured RPC`,
           );
         }
+      } catch (err) {
+        errors.push(
+          `contract "${contract.name}" (${contract.address}) code check failed: ${String(err)}`,
+        );
       }
-    } catch (err) {
-      errors.push(`RPC validation failed: ${String(err)}`);
     }
 
     return errors;
@@ -635,5 +717,224 @@ export class StartupValidationService {
     }
     const parsed = Number(raw);
     return Number.isFinite(parsed) && parsed >= 0 ? parsed : defaultValue;
+  }
+
+  /**
+   * Build the authoritative key for a chain/release/projection cursor.
+   */
+  private cursorKey(chainId: number, releaseId: string, projection: string): string {
+    return `${chainId}::${releaseId}::${projection}`;
+  }
+
+  /**
+   * Return the current checkpoint for a chain/release/projection, or null.
+   */
+  getCursor(
+    chainId: number,
+    releaseId: string,
+    projection: string,
+  ): BlockCursorCheckpoint | null {
+    return this.cursors.get(this.cursorKey(chainId, releaseId, projection)) ?? null;
+  }
+
+  /**
+   * Return a copy of the audit log for inspection/testing.
+   */
+  getCursorAuditLog(): ReadonlyArray<{
+    key: string;
+    previous: BlockCursorCheckpoint | null;
+    next: BlockCursorCheckpoint;
+    rollback: boolean;
+    writerId?: string;
+    reason?: string;
+    timestamp: string;
+  }> {
+    return [...this.cursorAuditLog];
+  }
+
+  /**
+   * Atomically advance the block cursor for a chain/release/projection using
+   * a monotonic compare-and-swap. Stale writers, hash disagreements, range
+   * skips and unauthorized rollbacks fail closed.
+   */
+  async advanceCursor(request: CursorAdvanceRequest): Promise<CursorAdvanceResult> {
+    const key = this.cursorKey(request.chainId, request.releaseId, request.projection);
+
+    // Serialize concurrent advance attempts per cursor key.
+    const previous = this.cursorLocks.get(key) ?? Promise.resolve();
+    let releaseLock: () => void = () => undefined;
+    const lock = new Promise<void>((resolve) => {
+      releaseLock = resolve;
+    });
+    this.cursorLocks.set(key, previous.then(() => lock));
+    await previous;
+
+    try {
+      return this.advanceCursorLocked(key, request);
+    } finally {
+      releaseLock();
+      if (this.cursorLocks.get(key) === lock) {
+        this.cursorLocks.delete(key);
+      }
+    }
+  }
+
+  /**
+   * Core compare-and-swap logic. Must be called while holding the cursor lock.
+   */
+  private advanceCursorLocked(
+    key: string,
+    request: CursorAdvanceRequest,
+  ): CursorAdvanceResult {
+    const current = this.cursors.get(key) ?? null;
+
+    // Validate request shape.
+    if (!Number.isFinite(request.blockHeight) || request.blockHeight < 0) {
+      return { advanced: false, reason: 'invalid blockHeight', current };
+    }
+    if (!request.blockHash) {
+      return { advanced: false, reason: 'missing blockHash', current };
+    }
+    if (!request.releaseId) {
+      return { advanced: false, reason: 'missing releaseId', current };
+    }
+    if (!request.projection) {
+      return { advanced: false, reason: 'missing projection', current };
+    }
+    if (!request.artifactChecksum) {
+      return { advanced: false, reason: 'missing artifactChecksum', current };
+    }
+
+    // Rollback requires explicit authorization.
+    if (request.rollback && !request.rollbackAuthorization) {
+      return {
+        advanced: false,
+        reason: 'rollback requires authorization',
+        current,
+      };
+    }
+
+    // Optimistic concurrency: reject stale writers.
+    if (request.expectedVersion !== undefined) {
+      const currentVersion = current?.version ?? 0;
+      if (request.expectedVersion !== currentVersion) {
+        return {
+          advanced: false,
+          reason: `stale writer: expected version ${request.expectedVersion} but current is ${currentVersion}`,
+          current,
+        };
+      }
+    }
+
+    if (current) {
+      // Bind chain-derived data to chain/release/deployment/checksum.
+      if (current.deploymentBlock !== request.deploymentBlock) {
+        return {
+          advanced: false,
+          reason: `deploymentBlock mismatch (current=${current.deploymentBlock}, request=${request.deploymentBlock})`,
+          current,
+        };
+      }
+      if (current.artifactChecksum !== request.artifactChecksum) {
+        return {
+          advanced: false,
+          reason: 'artifactChecksum mismatch',
+          current,
+        };
+      }
+
+      if (!request.rollback) {
+        // Monotonic advancement: cannot move backward outside rollback.
+        if (request.blockHeight < current.blockHeight) {
+          return {
+            advanced: false,
+            reason: `cursor cannot move backward (current=${current.blockHeight}, request=${request.blockHeight})`,
+            current,
+          };
+        }
+        // Same height with different hash is a fork(disagreement) -> fail closed.
+        if (request.blockHeight === current.blockHeight &&
+          request.blockHash.toLowerCase() !== current.blockHash.toLowerCase()) {
+          return {
+            advanced: false,
+            reason: `block hash disagreement at height ${request.blockHeight}`,
+            current,
+          };
+        }
+        // Competing writers cannot skip ranges: next height must be current + 1.
+        if (request.blockHeight > current.blockHeight + 1) {
+          return {
+            advanced: false,
+            reason: `cursor advance skips range (current=${current.blockHeeight}, request=${request.blockHeight})`,
+            current,
+          };
+        }
+      } else {
+        // Rollback must move strictly backward and not below the deployment floor.
+        if (request.blockHeight >= current.blockHeight) {
+          return {
+            advanced: false,
+            reason: `rollback must move strictly backward (current=${current.blockHeight}, request=${request.blockHeight})`,
+            current,
+          };
+        }
+        if (request.blockHeight < request.deploymentBlock) {
+          return {
+            advanced: false,
+            reason: `rollback below deployment floor (deploymentBlock=${request.deploymentBlock}, request=${request.blockHeight})`,
+            current,
+          };
+        }
+      }
+    } else {
+      // First write: cannot be below the deployment floor.
+      if (request.blockHeight < request.deploymentBlock) {
+        return {
+          advanced: false,
+          reason: `initial cursor below deployment floor (deploymentBlock=${request.deploymentBlock}, request=${request.blockHeight})`,
+          current,
+        };
+      }
+    }
+
+    // Finalized head must not regress below the cursor block height.
+    if (request.finalizedHead < request.blockHeight) {
+      return {
+        advanced: false,
+        reason: `finalizedHead (${request.finalizedHead}) below blockHeight (${request.blockHeight})`,
+        current,
+      };
+    }
+
+    const next: BlockCursorCheckpoint = {
+      chainId: request.chainId,
+      releaseId: request.releaseId,
+      projection: request.projection,
+      blockHeight: request.blockHeight,
+      blockHash: request.blockHash,
+      finalizedHead: request.finalizedHead,
+      deploymentBlock: request.deploymentBlock,
+      artifactChecksum: request.artifactChecksum,
+      version: (current?.version ?? 0) + 1,
+      rollback: request.rollback ?? true,
+      provenance: {
+        writerId: request.writerId,
+        reason: request.rollbackAuthorization,
+        timestamp: new Date().toISOString(),
+      },
+    };
+
+    this.cursors.set(key, next);
+    this.cursorAuditLog.push({
+      key,
+      previous: current,
+      next,
+      rollback: request.rollback ?? false,
+      writerId: request.writerId,
+      reason: request.rollbackAuthorization,
+      timestamp: new Date().toISOString(),
+    });
+
+    return { advanced: true, current, next };
   }
 }

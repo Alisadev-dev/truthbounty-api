@@ -1,4 +1,3 @@
-import { getRuntimeEnvironment } from '../config/runtime-config';
 import {
   Injectable,
   Logger,
@@ -12,6 +11,7 @@ import {
   Workload,
   WORKLOADS,
 } from './pool.config';
+import { getRuntimeEnvironment } from '../config/runtime-config';
 
 /**
  * Minimal, dependency-free sink used to report budget events into the

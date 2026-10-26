@@ -8,6 +8,7 @@ import {
 } from './v2-outbox.worker';
 import { V2OutboxMessage, V2OutboxStatus } from './entities/v2-outbox-message.entity';
 import { MetricsService } from '../../metrics/metrics.service';
+import { GracefulShutdownService } from '../../common/lifecycle/graceful-shutdown.service';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -123,6 +124,13 @@ describe('V2OutboxWorker', () => {
         { provide: DataSource, useValue: mockDataSource },
         { provide: getQueueToken(V2_OUTBOX_QUEUE_NAME), useValue: mockQueue },
         { provide: MetricsService, useValue: mockMetrics },
+        {
+          provide: GracefulShutdownService,
+          useValue: {
+            isDraining: false,
+            runTracked: jest.fn((_name, operation) => operation()),
+          },
+        },
       ],
     }).compile();
 

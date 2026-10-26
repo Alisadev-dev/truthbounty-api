@@ -4,10 +4,12 @@ import {
   Post,
   Body,
   Param,
+  Query,
   Headers,
   Req,
   HttpCode,
   HttpException,
+  HttpStatus,
   UnauthorizedException,
 } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
@@ -17,8 +19,35 @@ import { ReconciliationService } from './reconciliation.service';
 import { BlockchainStateService } from './state.service';
 import { WeightedVoteResolutionService } from './weighted-vote-resolution.service';
 import { ReadinessService } from './readiness.service';
-import { BlockInfo, ResolutionConfig, VerificationVote } from './types';
+import { DeadLetterReplayService } from './dead-letter-replay.service';
+import {
+  BlockInfo,
+  ResolutionConfig,
+  VerificationVote,
+  DeadLetterReplayRequest,
+  DeadLetterReplayResult,
+  DeadLetterBatchControlRequest,
+  DeadLetterBatchControlResult,
+} from './types';
+import {
+  StreamEnvelope,
+  StreamEnvelopeVersion,
+  StreamResumeTokenPayload,
+  StreamBackfillResponse,
+  StreamReconciliationRequirement,
+} from './stream.types';
+import { StreamResumeService } from './stream-resume.service';
 import { WebhookSignatureService } from './webhook-signature.service';
+
+/**
+ * Request headers required for dead-letter replay authorization.
+ * The capability token is validated by the replay service against the
+ * configured protected capability and is never logged or echoed back.
+ */
+export interface ReplayAuthorizationHeaders {
+  'operator-id'?: string;
+  'replay-capability'?: string;
+}
 
 @ApiTags('blockchain')
 @Controller('api/v1/blockchain')
@@ -28,7 +57,9 @@ export class BlockchainController {
     private reconciliation: ReconciliationService,
     private stateService: BlockchainStateService,
     private voteResolver: WeightedVoteResolutionService,
+    private streamResume: StreamResumeService,
     private readinessService: ReadinessService,
+    private replayService: DeadLetterReplayService,
     private webhookSignatureService: WebhookSignatureService,
   ) {}
 
@@ -236,7 +267,7 @@ export class BlockchainController {
     } catch (error) {
       return {
         success: false,
-        error: error.message,
+        error: (error as Error).message,
       };
     }
   }
@@ -272,6 +303,174 @@ export class BlockchainController {
       votes: testVotes,
       resolution,
     };
+  }
+
+  /**
+   * Get the current stream envelope metadata and a fresh resume token.
+   * GET /api/v1/blockchain/streams/envelope
+   */
+  @Get('streams/envelope')
+  async getStreamEnvelope(): Promise<StreamEnvelope> {
+    return this.streamResume.getCurrentEnvelope();
+  }
+
+  /**
+   * Resume a stream from an opaque resume token.
+   * POST /api/v1/blockchain/streams/resume
+   */
+  @Post('streams/resume')
+  async resumeStream(
+    @Body() body: { resumeToken: string },
+  ): Promise<StreamBackfillResponse> {
+    if (!body || typeof body.resumeToken !== 'string' || body.resumeToken.length === 0) {
+      throw new HttpException(
+        {
+          error: 'invalid_resume_token',
+          message: 'resumeToken is required',
+        },
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+
+    const result = await this.streamResume.resume(body.resumeToken);
+    if (!result.ok) {
+      throw new HttpException(result.body, result.status);
+    }
+    return result.body;
+  }
+
+  /**
+   * Bounded HTTP backfill from a cursor.
+   * GET /api/v1/blockchain/streams/backfill?cursor=...&limit=...
+   */
+  @Get('streams/backfill')
+  async backfillStream(
+    @Query('cursor') cursor: string,
+    @Query('limit') limit?: string,
+    @Headers('if-none-match') etag?: string,
+  ): Promise<StreamBackfillResponse> {
+    if (!cursor || cursor.length === 0) {
+      throw new HttpException(
+        { error: 'invalid_cursor', message: 'cursor is required' },
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+
+    const parsedLimit = limit === undefined ? undefined : Number(limit);
+    if (
+      parsedLimit !== undefined &&
+      (!Number.isFinite(parsedLimit) || parsedLimit <= 0)
+    ) {
+      throw new HttpException(
+        { error: 'invalid_limit', message: 'limit must be a positive integer' },
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+
+    const result = await this.streamResume.backfill(cursor, parsedLimit, etag);
+    if (!result.ok) {
+      throw new HttpException(result.body, result.status);
+    }
+    return result.body;
+  }
+
+  /**
+   * Decode a resume token for observability / client reconciliation.
+   * Tokens are opaque to clients but can be inspected to determine whether a
+   * canonical resync is required. No protected payload is returned.
+   * GET /api/v1/blockchain/streams/token/inspect?token=...
+   */
+  @Get('streams/token/inspect')
+  async inspectResumeToken(
+    @Query('token') token: string,
+  ): Promise<StreamReconciliationRequirement> {
+    if (!token || token.length === 0) {
+      throw new HttpException(
+        { error: 'invalid_resume_token', message: 'token is required' },
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+    return this.streamResume.inspectToken(token);
+  }
+
+  /**
+   * Replay a single dead-letter message.
+   *
+   * Replay is denied by default: the caller must supply the protected
+   * capability header, an explicit reason, bounds, a dry-run flag, and the
+   * original payload hash. The service enforces release/schema compatibility,
+   * idempotency, and audit recording.
+   */
+  @Post('dead-letter/replay')
+  @ApiTags('dead-letter')
+  async replayDeadLetter(
+    @Body() request: DeadLetterReplayRequest,
+    @Headers() headers: ReplayAuthorizationHeaders,
+  ): Promise<DeadLetterReplayResult> {
+    return this.replayService.replaySingle(request, {
+      capability: headers['replay-capability'],
+      operatorId: headers['operator-id'],
+    });
+  }
+
+  /**
+   * Replay a bounded batch of dead-letter messages.
+   */
+  @Post('dead-letter/replay/batch')
+  @ApiTags('dead-letter')
+  async replayDeadLetterBatch(
+    @Body() request: DeadLetterBatchControlRequest,
+    @Headers() headers: ReplayAuthorizationHeaders,
+  ): Promise<DeadLetterBatchControlResult> {
+    return this.replayService.replayBatch(request, {
+      capability: headers['replay-capability'],
+      operatorId: headers['operator-id'],
+    });
+  }
+
+  /**
+   * Stop an in-flight bounded replay batch.
+   */
+  @Post('dead-letter/replay/batch/:replayId/stop')
+  @ApiTags('dead-letter')
+  async stopDeadLetterReplayBatch(
+    @Param('replayId') replayId: string,
+    @Headers() headers: ReplayAuthorizationHeaders,
+  ): Promise<DeadLetterBatchControlResult> {
+    return this.replayService.stopBatch(replayId, {
+      capability: headers['replay-capability'],
+      operatorId: headers['operator-id'],
+    });
+  }
+
+  /**
+   * Resume a stopped bounded replay batch.
+   */
+  @Post('dead-letter/replay/batch/:replayId/resume')
+  @ApiTags('dead-letter')
+  async resumeDeadLetterReplayBatch(
+    @Param('replayId') replayId: string,
+    @Headers() headers: ReplayAuthorizationHeaders,
+  ): Promise<DeadLetterBatchControlResult> {
+    return this.replayService.resumeBatch(replayId, {
+      capability: headers['replay-capability'],
+      operatorId: headers['operator-id'],
+    });
+  }
+
+  /**
+   * Get the immutable audit record for a replay (original -> replay linkage).
+   */
+  @Get('dead-letter/replay/:replayId/audit')
+  @ApiTags('dead-letter')
+  async getDeadLetterReplayAudit(
+    @Param('replayId') replayId: string,
+    @Headers() headers: ReplayAuthorizationHeaders,
+  ) {
+    return this.replayService.getAuditRecord(replayId, {
+      capability: headers['replay-capability'],
+      operatorId: headers['operator-id'],
+    });
   }
 
   /**
@@ -322,7 +521,7 @@ export class BlockchainController {
           {
             ...baseVote,
             userId: 'user2',
-            verdict: 'FALSE',
+            verdict: 'ALSE',
             userReputation: 70,
             stakeAmount: '100',
           },

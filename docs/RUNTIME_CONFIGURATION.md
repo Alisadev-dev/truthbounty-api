@@ -230,6 +230,7 @@ Legacy `RELEASE_MANIFEST_MAX_AGE_MS` must migrate to `CONTRACT_RELEASE_MAX_AGE_D
 | AUDIT_LOG_RETENTION_CRON | non-empty string | (unset) | no | - |
 | AUDIT_LOG_RETENTION_DAYS | integer 1..9007199254740991 | 365 | no | - |
 | AUDIT_PII_RETENTION_DAYS | integer 1..9007199254740991 | 30 | no | - |
+| EVENT_QUARANTINE_RETENTION_DAYS | integer 1..3650 | 90 | no | - |
 | AUDIT_MAX_BATCH_WAIT_MS | integer 1..9007199254740991 | 1000 | no | - |
 | AUDIT_METRIC_PREFIX | non-empty string | audit | no | - |
 | AUDIT_MAX_API_CALLS | integer 1..9007199254740991 | 100 | no | - |
